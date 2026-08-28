@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-"""Local dev runner for ansi-rs â€” stdlib Python driving cargo, no task runner.
+"""Local dev runner for ansi-rs — stdlib Python driving cargo, no task runner.
 
 The same `python dev.py check` gate as every nativelite package, so the muscle
 memory is identical across languages. Here `check` is the zero-dependency guard
