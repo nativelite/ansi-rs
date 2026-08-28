@@ -1,0 +1,17 @@
+[package]
+name = "ansi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "ANSI/VT terminal output as data: styled-output building, incremental escape-sequence parsing, and screen-diff rendering, using only the Rust standard library."
+license = "MIT"
+repository = "https://github.com/nativelite/ansi-rs"
+keywords = ["ansi", "vt100", "terminal", "tui", "nativelite"]
+categories = ["command-line-interface", "parser-implementations"]
+
+# nativelite core rule: ZERO third-party dependencies. Do not add to this.
+[dependencies]
+
+[lib]
+name = "ansi"
+path = "src/lib.rs"
