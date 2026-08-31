@@ -8,6 +8,10 @@ sequences, parse them, and diff screen frames — with no I/O at all: no raw
 mode, no stdin/stdout, no PTY. Feed it bytes from anywhere; write its bytes
 to anywhere.
 
+## Philosophy
+
+See [nativelite-philosophy](https://github.com/nativelite/nativelite-philosophy) for the broader engineering standards and attack surface reduction strategy behind all nativelite packages.
+
 ## Three capabilities, one concern
 
 **Build styled output.** `Style` + `Color` (default / 256-indexed / RGB)
