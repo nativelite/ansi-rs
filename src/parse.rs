@@ -1,7 +1,7 @@
 //! Incremental VT/ANSI tokenizer.
 //!
-//! [`Parser::feed`] accepts a byte stream in chunks split at *any* boundary —
-//! mid-escape-sequence, mid-UTF-8 character — and yields [`Token`]s. The
+//! [`Parser::feed`] accepts a byte stream in chunks split at *any* boundary
+//! (mid-escape-sequence, mid-UTF-8 character) and yields [`Token`]s. The
 //! state machine follows the classic VT500-series design: C0 controls are
 //! *executed* (emitted as [`Token::Control`]) even when they arrive inside an
 //! escape sequence, `CAN`/`SUB` abort a sequence in progress, and a stray
@@ -18,7 +18,7 @@ pub enum Token {
     /// A C0 control byte executed on its own (BEL, BS, TAB, LF, CR, ...) or
     /// DEL. `ESC` never appears here; it introduces a sequence.
     Control(u8),
-    /// `ESC [ ...` — a CSI sequence: optional private marker (`?`, `>`, `<`,
+    /// `ESC [ ...`: a CSI sequence with an optional private marker (`?`, `>`, `<`,
     /// `=`), numeric parameters, intermediate bytes, and the final byte.
     /// Missing parameters parse as 0; colon sub-parameters are truncated.
     Csi {
@@ -33,7 +33,7 @@ pub enum Token {
         intermediates: Vec<u8>,
         final_byte: u8,
     },
-    /// `ESC ] ...` — an OSC string, terminated by BEL or ST (`ESC \`).
+    /// `ESC ] ...`: an OSC string, terminated by BEL or ST (`ESC \`).
     /// Payload bytes are decoded as UTF-8 (lossily).
     Osc(String),
     /// A DCS/SOS/PM/APC string (`intro` is `P`, `X`, `^`, or `_`), swallowed

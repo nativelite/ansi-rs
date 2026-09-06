@@ -5,7 +5,7 @@
 use crate::style::Style;
 
 /// One character cell: a `char` plus its [`Style`]. The default cell is a
-/// space in the default style. Every `char` occupies exactly one cell — this
+/// space in the default style. Every `char` occupies exactly one cell; this
 /// crate does not model East Asian double-width rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {

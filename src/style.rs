@@ -1,5 +1,5 @@
 //! SGR styles as data: build escape sequences from a [`Style`], and apply
-//! parsed SGR parameters back onto one — the two directions used by the
+//! parsed SGR parameters back onto one: the two directions used by the
 //! screen renderer and by anything interpreting terminal output.
 
 /// A terminal color: the terminal's default, one of the 256 indexed colors

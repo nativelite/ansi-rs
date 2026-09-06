@@ -1,4 +1,4 @@
-//! ansi — ANSI/VT terminal output as data, on the Rust standard library
+//! ansi: ANSI/VT terminal output as data, on the Rust standard library
 //! alone. Zero dependencies.
 //!
 //! Three tightly-related capabilities, all pure bytes in / bytes out:
@@ -7,7 +7,7 @@
 //!   sequences, absolutely ([`Style::sgr`]) or as a minimal transition from a
 //!   previous style ([`Style::transition_to`]).
 //! * **Parse** a terminal byte stream incrementally: [`Parser::feed`] accepts
-//!   chunks split at *any* byte boundary — mid-escape, mid-UTF-8 — and yields
+//!   chunks split at *any* byte boundary (mid-escape, mid-UTF-8) and yields
 //!   [`Token`]s (text runs, C0 controls, CSI/ESC/OSC sequences).
 //! * **Render by diff**: [`Screen`] is a grid of styled [`Cell`]s;
 //!   [`Screen::diff`] emits the minimal cursor-move/SGR/text bytes that turn

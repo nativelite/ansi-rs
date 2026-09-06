@@ -13,14 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Style` / `Color` (default, 256-indexed, RGB): `sgr()` absolute sequences,
   `transition_to()` minimal style-change sequences, and `apply_sgr()` to
   replay parsed SGR parameters onto a style.
-- `Parser` — incremental VT/ANSI tokenizer accepting chunks split at any
+- `Parser`: incremental VT/ANSI tokenizer accepting chunks split at any
   byte boundary (mid-escape, mid-UTF-8). Tokens: `Text`, `Control`, `Csi`
   (private marker, params, intermediates, final), `Esc`, `Osc` (BEL and ST
   terminators), and raw `Other` for DCS/SOS/PM/APC. VT500-style semantics:
   C0 executes inside sequences, `CAN`/`SUB` abort, stray `ESC` restarts,
   malformed sequences are dropped, invalid UTF-8 becomes U+FFFD; payload
   sizes are bounded against hostile streams.
-- `Screen` / `Cell` — styled cell grid with `diff()` (cursor moves + minimal
+- `Screen` / `Cell`: styled cell grid with `diff()` (cursor moves + minimal
   SGR transitions + changed chars only; empty output for equal frames;
   dimension mismatch falls back to full repaint) and `render_full()`.
 - Test suite: byte-exact SGR goldens, build→parse→apply round trips across
