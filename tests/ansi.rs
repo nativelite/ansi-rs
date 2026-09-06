@@ -4,7 +4,7 @@
 //! re-apply must reproduce the style); tokenizer fixtures from xterm/ECMA-48
 //! sequences, each also replayed byte-at-a-time to prove chunk-split
 //! invariance; and the screen renderer verified end-to-end by applying its
-//! own diff output through the parser to an interpreted screen — the diff is
+//! own diff output through the parser to an interpreted screen: the diff is
 //! correct iff the interpreted result equals the target frame.
 
 use ansi::{Cell, Color, Parser, Screen, Style, Token};
@@ -152,7 +152,7 @@ fn csi(params: &[u16], final_byte: char) -> Token {
     }
 }
 
-/// (input bytes, expected tokens) — the fixture table.
+/// (input bytes, expected tokens): the fixture table.
 fn fixtures() -> Vec<(&'static [u8], Vec<Token>)> {
     vec![
         (b"hello", vec![Token::Text("hello".into())]),
@@ -298,7 +298,7 @@ fn tokenizer_fixtures_one_shot() {
     }
 }
 
-/// Feeding byte-at-a-time must produce the same tokens as one shot — chunk
+/// Feeding byte-at-a-time must produce the same tokens as one shot; chunk
 /// boundaries can split escapes and multibyte characters anywhere.
 #[test]
 fn tokenizer_fixtures_split_at_every_byte() {
