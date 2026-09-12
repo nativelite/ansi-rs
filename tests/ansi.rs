@@ -383,6 +383,19 @@ fn apply(screen: &mut Screen, bytes: &[u8]) {
                     }
                 }
             }
+            Token::Csi {
+                final_byte: 'K',
+                params,
+                private: None,
+                ..
+            } => {
+                // EL 0 (or bare EL): erase from cursor to end of line.
+                if params.first().copied().unwrap_or(0) == 0 {
+                    for cc in col..screen.cols() {
+                        screen.set(row, cc, Cell::default());
+                    }
+                }
+            }
             _ => panic!("renderer emitted unexpected token: {t:?}"),
         }
     }
