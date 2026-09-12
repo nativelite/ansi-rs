@@ -346,7 +346,7 @@ fn apply(screen: &mut Screen, bytes: &[u8]) {
         match t {
             Token::Text(s) => {
                 for ch in s.chars() {
-                    screen.set(row, col, Cell { ch, style });
+                    screen.set(row, col, Cell::new(ch, style));
                     col += 1;
                     if col >= screen.cols() {
                         col = screen.cols() - 1; // park at edge; diff always CUPs after edge writes
@@ -431,14 +431,7 @@ fn diff_reproduces_target_frames() {
 
     // single-cell change
     let mut b = a.clone();
-    b.set(
-        0,
-        1,
-        Cell {
-            ch: 'a',
-            style: Style::default(),
-        },
-    );
+    b.set(0, 1, Cell::new('a', Style::default()));
     check_diff(&a, &b);
 
     // styled run + second row
@@ -497,14 +490,7 @@ fn diff_golden_minimal_bytes() {
     let mut old = Screen::new(2, 10);
     old.write_str(0, 0, "hello", Style::default());
     let mut new = old.clone();
-    new.set(
-        0,
-        1,
-        Cell {
-            ch: 'a',
-            style: Style::default(),
-        },
-    );
+    new.set(0, 1, Cell::new('a', Style::default()));
     // one CUP, one char, no SGR needed, park cursor at (1,1)
     assert_eq!(old.diff(&new), b"\x1b[1;2Ha\x1b[1;1H");
 }
