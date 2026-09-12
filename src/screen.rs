@@ -51,6 +51,14 @@ impl Screen {
         self.cols
     }
 
+    /// Reset all cells to default and the cursor to the origin, reusing the
+    /// existing allocation. The caller must ensure the screen is already the
+    /// right size; use [`Screen::new`] when the size changes.
+    pub fn clear(&mut self) {
+        self.cells.fill(Cell::default());
+        self.cursor = (0, 0);
+    }
+
     /// The cell at `(row, col)`; out of bounds returns a default cell.
     pub fn cell(&self, row: usize, col: usize) -> Cell {
         if row < self.rows && col < self.cols {
