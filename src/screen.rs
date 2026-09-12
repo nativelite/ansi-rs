@@ -148,3 +148,52 @@ fn emit_changes(prev: Option<&Screen>, next: &Screen, out: &mut String) {
     let (r, c) = next.cursor;
     write!(out, "\x1b[{};{}H", r + 1, c + 1).unwrap();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::Style;
+
+    #[test]
+    fn clear_resets_all_cells_and_cursor_without_realloc() {
+        let mut s = Screen::new(4, 6);
+        // Dirty every cell with a non-default character and style.
+        let dirty_style = Style {
+            bold: true,
+            ..Style::default()
+        };
+        for r in 0..4 {
+            for c in 0..6 {
+                s.set(
+                    r,
+                    c,
+                    Cell {
+                        ch: 'X',
+                        style: dirty_style,
+                    },
+                );
+            }
+        }
+        // Move the cursor off the origin.
+        s.cursor = (3, 5);
+
+        s.clear();
+
+        // Dimensions must be unchanged.
+        assert_eq!(s.rows(), 4);
+        assert_eq!(s.cols(), 6);
+        // Cursor must be at the origin.
+        assert_eq!(s.cursor, (0, 0));
+        // Every cell must equal the default.
+        let blank = Cell::default();
+        for r in 0..4 {
+            for c in 0..6 {
+                assert_eq!(
+                    s.cell(r, c),
+                    blank,
+                    "cell ({r},{c}) was not reset by clear()"
+                );
+            }
+        }
+    }
+}
