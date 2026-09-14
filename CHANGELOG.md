@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Breaking (0.3.0): the double-width model and the cursor are typed.
+## [0.3.0] - 2026-09-14
+
+Breaking: the double-width model and the cursor are typed.
 
 ### Changed
 - **`Cell.width` is a `CellWidth` enum** (`Continuation`, `Single`, `Wide`),
@@ -49,5 +51,6 @@ Breaking (0.3.0): the double-width model and the cursor are typed.
 Second crate in the nativelite **agent terminal** suite (see
 `roadmap/agent-terminal-suite.md` in `nativelite/ops`).
 
-[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/nativelite/ansi-rs/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/nativelite/ansi-rs/releases/tag/v0.1.0
