@@ -113,6 +113,9 @@ impl Cursor {
 pub struct Screen {
     rows: usize,
     cols: usize,
+    /// Row-major, and exactly `rows * cols` long: sized by [`Screen::new`] and
+    /// never grown or shrunk afterwards (`clear` refills in place, `set` and
+    /// `copy_cells` overwrite in bounds). The indexers check it in debug builds.
     cells: Vec<Cell>,
     /// Where the cursor should rest after rendering. Always on the grid (see
     /// [`Screen::set_cursor`]).
@@ -163,10 +166,18 @@ impl Screen {
         self.cursor = Cursor::default();
     }
 
+    /// The flat index of `(row, col)`, which the caller has bounds-checked.
+    #[inline]
+    fn index(&self, row: usize, col: usize) -> usize {
+        debug_assert_eq!(self.cells.len(), self.rows * self.cols);
+        debug_assert!(row < self.rows && col < self.cols);
+        row * self.cols + col
+    }
+
     /// The cell at `(row, col)`; out of bounds returns a default cell.
     pub fn cell(&self, row: usize, col: usize) -> Cell {
         if row < self.rows && col < self.cols {
-            self.cells[row * self.cols + col]
+            self.cells[self.index(row, col)]
         } else {
             Cell::default()
         }
@@ -175,7 +186,8 @@ impl Screen {
     /// Set one cell. Out-of-bounds writes are ignored.
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
-            self.cells[row * self.cols + col] = cell;
+            let i = self.index(row, col);
+            self.cells[i] = cell;
         }
     }
 
@@ -199,7 +211,7 @@ impl Screen {
             return;
         }
         let n = cells.len().min(self.cols - col);
-        let base = row * self.cols + col;
+        let base = self.index(row, col);
         self.cells[base..base + n].copy_from_slice(&cells[..n]);
     }
 
