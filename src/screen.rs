@@ -4,29 +4,52 @@
 
 use crate::style::Style;
 
-/// One character cell: a `char`, its [`Style`], and its display `width` in
-/// terminal columns. The default cell is a single-width space in the default
-/// style.
-///
-/// `width` lets the grid model East Asian double-width glyphs and emoji, which
-/// occupy two columns:
-///
-/// - `1` — a normal single-width cell (the common case, and the default).
-/// - `2` — the **lead** (left half) of a double-width glyph; `ch` holds the
-///   character. The cell immediately to its right should be a width-`0`
-///   continuation.
-/// - `0` — a **continuation** (right half) of the glyph to its left: it carries
-///   no character of its own and is never emitted, because the terminal
-///   advances the cursor by two columns when it draws the lead glyph.
+/// How many terminal columns a [`Cell`] covers, modeling East Asian
+/// double-width glyphs and emoji, which occupy two columns.
 ///
 /// This crate does not *compute* width — that needs the Unicode database, which
-/// a zero-dependency crate cannot own. Callers set `width` (e.g. from the
-/// `uwidth` crate); the renderers here honor whatever `width` they are given.
+/// a zero-dependency crate cannot own. Callers pick the width (e.g. from the
+/// `uwidth` crate); the renderers here honor whatever they are given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CellWidth {
+    /// The right half of the double-width glyph to its left: it carries no
+    /// character of its own and is never emitted, because the terminal advances
+    /// the cursor by two columns when it draws the lead glyph.
+    Continuation,
+    /// A normal single-width cell (the common case, and the default).
+    #[default]
+    Single,
+    /// The left half (lead) of a double-width glyph; the cell holds the
+    /// character, and the cell immediately to its right should be a
+    /// [`CellWidth::Continuation`].
+    Wide,
+}
+
+impl CellWidth {
+    /// The columns this cell advances the terminal cursor when drawn: `0`, `1`
+    /// or `2`.
+    pub const fn columns(self) -> usize {
+        match self {
+            CellWidth::Continuation => 0,
+            CellWidth::Single => 1,
+            CellWidth::Wide => 2,
+        }
+    }
+}
+
+/// One character cell: a `char`, its [`Style`], and its [`CellWidth`]. The
+/// default cell is a single-width space in the default style.
+///
+/// A double-width glyph is a [`Cell::wide`] lead followed by a
+/// [`Cell::continuation`]; build cells with the constructors to keep that
+/// pairing. A grid can still hold an unpaired half (a compositor clipping a
+/// row through a glyph produces one), so readers of arbitrary cells should
+/// expect it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
     pub style: Style,
-    pub width: u8,
+    pub width: CellWidth,
 }
 
 impl Default for Cell {
@@ -34,51 +57,66 @@ impl Default for Cell {
         Cell {
             ch: ' ',
             style: Style::default(),
-            width: 1,
+            width: CellWidth::Single,
         }
     }
 }
 
 impl Cell {
-    /// A normal single-width cell (`width == 1`).
+    /// A normal single-width cell.
     pub const fn new(ch: char, style: Style) -> Self {
         Cell {
             ch,
             style,
-            width: 1,
+            width: CellWidth::Single,
         }
     }
 
-    /// The lead (left half) of a double-width glyph (`width == 2`). Its right
-    /// neighbor should be a [`Cell::continuation`].
+    /// The lead (left half) of a double-width glyph. Its right neighbor should
+    /// be a [`Cell::continuation`].
     pub const fn wide(ch: char, style: Style) -> Self {
         Cell {
             ch,
             style,
-            width: 2,
+            width: CellWidth::Wide,
         }
     }
 
-    /// A continuation (right half) of a double-width glyph (`width == 0`): no
-    /// character of its own, but carrying `style` so the covered column keeps
-    /// the right background. Never emitted — the lead glyph fills both columns.
+    /// A continuation (right half) of a double-width glyph: no character of its
+    /// own, but carrying `style` so the covered column keeps the right
+    /// background. Never emitted — the lead glyph fills both columns.
     pub const fn continuation(style: Style) -> Self {
         Cell {
             ch: ' ',
             style,
-            width: 0,
+            width: CellWidth::Continuation,
         }
     }
 }
 
-/// A `rows x cols` grid of [`Cell`]s plus a cursor position, both 0-based.
+/// A 0-based cursor position on a [`Screen`]. Named fields, so a row and a
+/// column cannot be transposed the way a bare `(usize, usize)` can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Cursor {
+    pub row: usize,
+    pub col: usize,
+}
+
+impl Cursor {
+    pub const fn new(row: usize, col: usize) -> Self {
+        Cursor { row, col }
+    }
+}
+
+/// A `rows x cols` grid of [`Cell`]s plus a [`Cursor`], both 0-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
     rows: usize,
     cols: usize,
     cells: Vec<Cell>,
-    /// Where the cursor should rest after rendering: `(row, col)`, 0-based.
-    pub cursor: (usize, usize),
+    /// Where the cursor should rest after rendering. Always on the grid (see
+    /// [`Screen::set_cursor`]).
+    cursor: Cursor,
 }
 
 impl Screen {
@@ -88,7 +126,7 @@ impl Screen {
             rows,
             cols,
             cells: vec![Cell::default(); rows * cols],
-            cursor: (0, 0),
+            cursor: Cursor::default(),
         }
     }
 
@@ -100,12 +138,29 @@ impl Screen {
         self.cols
     }
 
+    /// Where the cursor rests after rendering.
+    #[inline]
+    pub fn cursor(&self) -> Cursor {
+        self.cursor
+    }
+
+    /// Move the cursor, clamped onto the grid: a row or column past the edge
+    /// lands on the last row or column (the origin on an empty screen). The
+    /// renderers park the terminal cursor here.
+    #[inline]
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        self.cursor = Cursor {
+            row: cursor.row.min(self.rows.saturating_sub(1)),
+            col: cursor.col.min(self.cols.saturating_sub(1)),
+        };
+    }
+
     /// Reset all cells to default and the cursor to the origin, reusing the
     /// existing allocation. The caller must ensure the screen is already the
     /// right size; use [`Screen::new`] when the size changes.
     pub fn clear(&mut self) {
         self.cells.fill(Cell::default());
-        self.cursor = (0, 0);
+        self.cursor = Cursor::default();
     }
 
     /// The cell at `(row, col)`; out of bounds returns a default cell.
@@ -126,7 +181,7 @@ impl Screen {
 
     /// Write a string across a row starting at `(row, col)`, truncating at
     /// the right edge. Each `char` takes one cell (single-width); callers that
-    /// need double-width layout set [`Cell::width`] and use [`Screen::set`] or
+    /// need double-width layout use [`Cell::wide`] with [`Screen::set`] or
     /// [`Screen::copy_cells`].
     pub fn write_str(&mut self, row: usize, col: usize, text: &str, style: Style) {
         for (i, ch) in text.chars().enumerate() {
@@ -151,7 +206,7 @@ impl Screen {
     /// The bytes that transform a terminal currently showing `self` into one
     /// showing `next`: cursor moves (CUP), minimal SGR transitions, and the
     /// changed characters, ending with a style reset and the cursor parked at
-    /// `next.cursor`. Equal screens produce no bytes at all.
+    /// `next`'s cursor. Equal screens produce no bytes at all.
     ///
     /// Both screens must have the same dimensions; if they differ (a resize),
     /// the diff falls back to a full repaint of `next`.
@@ -169,7 +224,7 @@ impl Screen {
 
     /// A from-scratch repaint: clear the screen, then paint every non-default
     /// cell, ending with a style reset and the cursor parked at
-    /// `self.cursor`.
+    /// this screen's cursor.
     pub fn render_full(&self) -> Vec<u8> {
         let mut out = String::from("\x1b[2J");
         emit_changes(None, self, &mut out);
@@ -206,7 +261,7 @@ fn emit_changes(prev: Option<&Screen>, next: &Screen, out: &mut String) {
             // glyph: it carries no character of its own and emits nothing. The
             // lead cell to its left drew the glyph and the terminal advanced the
             // cursor across both columns.
-            if target.width == 0 {
+            if target.width == CellWidth::Continuation {
                 continue;
             }
             let same = match prev {
@@ -228,7 +283,7 @@ fn emit_changes(prev: Option<&Screen>, next: &Screen, out: &mut String) {
             // before — ASCII output is byte-for-byte unchanged.) At or past the
             // right edge the position is ambiguous (pending wrap), so drop it to
             // force an explicit move next time.
-            let advance = target.width.max(1) as usize;
+            let advance = target.width.columns();
             at = if col + advance < next.cols {
                 Some((row, col + advance))
             } else {
@@ -261,8 +316,8 @@ fn emit_changes(prev: Option<&Screen>, next: &Screen, out: &mut String) {
         }
     }
     out.push_str(&style.transition_to(&Style::default()));
-    let (r, c) = next.cursor;
-    write!(out, "\x1b[{};{}H", r + 1, c + 1).unwrap();
+    let Cursor { row, col } = next.cursor;
+    write!(out, "\x1b[{};{}H", row + 1, col + 1).unwrap();
 }
 
 #[cfg(test)]
@@ -301,7 +356,7 @@ mod tests {
             }
         }
         // Move the cursor off the origin.
-        s.cursor = (3, 5);
+        s.set_cursor(Cursor::new(3, 5));
 
         s.clear();
 
@@ -309,7 +364,7 @@ mod tests {
         assert_eq!(s.rows(), 4);
         assert_eq!(s.cols(), 6);
         // Cursor must be at the origin.
-        assert_eq!(s.cursor, (0, 0));
+        assert_eq!(s.cursor(), Cursor::new(0, 0));
         // Every cell must equal the default.
         let blank = Cell::default();
         for r in 0..4 {
@@ -401,11 +456,16 @@ mod tests {
     #[test]
     fn cell_constructors_set_width() {
         let st = Style::default();
-        assert_eq!(Cell::default().width, 1);
-        assert_eq!(Cell::new('a', st).width, 1);
-        assert_eq!(Cell::wide('世', st).width, 2);
+        assert_eq!(Cell::default().width, CellWidth::Single);
+        assert_eq!(Cell::new('a', st).width, CellWidth::Single);
+        assert_eq!(Cell::wide('世', st).width, CellWidth::Wide);
         let cont = Cell::continuation(st);
-        assert_eq!(cont.width, 0);
+        assert_eq!(cont.width, CellWidth::Continuation);
+        let cols: Vec<usize> = [CellWidth::Continuation, CellWidth::Single, CellWidth::Wide]
+            .iter()
+            .map(|w| w.columns())
+            .collect();
+        assert_eq!(cols, [0, 1, 2]);
         assert_eq!(cont.ch, ' ');
     }
 
@@ -446,12 +506,25 @@ mod tests {
 
     #[test]
     fn ascii_diff_is_byte_identical_regression() {
-        // Guard: adding Cell.width must not change single-width output at all.
+        // Guard: the width model must not change single-width output at all.
         let mut old = Screen::new(2, 10);
         old.write_str(0, 0, "hello", Style::default());
         let mut new = old.clone();
         new.set(0, 1, Cell::new('a', Style::default()));
         assert_eq!(old.diff(&new), b"\x1b[1;2Ha\x1b[1;1H");
+    }
+
+    #[test]
+    fn set_cursor_clamps_onto_the_grid() {
+        let mut s = Screen::new(4, 6);
+        s.set_cursor(Cursor::new(2, 3));
+        assert_eq!(s.cursor(), Cursor::new(2, 3));
+        s.set_cursor(Cursor::new(99, 99));
+        assert_eq!(s.cursor(), Cursor::new(3, 5));
+        // An empty screen has no cell to stand on: the origin.
+        let mut empty = Screen::new(0, 0);
+        empty.set_cursor(Cursor::new(5, 5));
+        assert_eq!(empty.cursor(), Cursor::new(0, 0));
     }
 
     #[test]

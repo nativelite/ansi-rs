@@ -34,5 +34,5 @@ mod screen;
 mod style;
 
 pub use parse::{Parser, Token};
-pub use screen::{Cell, Screen};
+pub use screen::{Cell, CellWidth, Cursor, Screen};
 pub use style::{Color, Style};

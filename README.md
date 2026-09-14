@@ -64,7 +64,10 @@ stdout_write(&prev.diff(&next)); // your I/O, not ours
 - **Full terminal emulation**: the parser tokenizes; it does not maintain
   scrollback, tabs, or modes. `apply_sgr` is provided because the renderer
   and any output-interpreter need it.
-- **East Asian double-width**: every `char` is one cell in `Screen`.
+- **Computing display width**: `Cell` models double-width glyphs
+  (`CellWidth::Wide` + `CellWidth::Continuation`) and the renderers honor
+  them, but deciding a character's width needs the Unicode database — pair
+  this crate with `uwidth`.
 - **Scroll-region diff tricks**: the diff is cell-precise but does not emit
   scroll commands.
 

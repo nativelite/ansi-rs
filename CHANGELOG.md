@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Breaking (0.3.0): the double-width model and the cursor are typed.
+
+### Changed
+- **`Cell.width` is a `CellWidth` enum** (`Continuation`, `Single`, `Wide`),
+  not a `u8`: a width of 3 is no longer representable. `CellWidth::columns()`
+  gives the 0/1/2 column advance. `Cell::new`/`wide`/`continuation` are
+  unchanged.
+- **`Screen.cursor` is private.** Read it with `Screen::cursor()` and move it
+  with `Screen::set_cursor()`, both as a `Cursor { row, col }` — named fields
+  instead of a transposable `(usize, usize)`. `set_cursor` clamps onto the
+  grid, so the parked cursor is always a real cell.
+
+### Fixed
+- README no longer claims `Screen` has no double-width support (it has since
+  0.2.0).
+
 ## [0.1.0] - 2026-08-28
 
 ### Added

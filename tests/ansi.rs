@@ -7,7 +7,7 @@
 //! own diff output through the parser to an interpreted screen: the diff is
 //! correct iff the interpreted result equals the target frame.
 
-use ansi::{Cell, Color, Parser, Screen, Style, Token};
+use ansi::{Cell, Color, Cursor, Parser, Screen, Style, Token};
 
 fn style(f: impl Fn(&mut Style)) -> Style {
     let mut s = Style::default();
@@ -399,7 +399,7 @@ fn apply(screen: &mut Screen, bytes: &[u8]) {
             _ => panic!("renderer emitted unexpected token: {t:?}"),
         }
     }
-    screen.cursor = (row, col);
+    screen.set_cursor(Cursor::new(row, col));
 }
 
 fn check_diff(old: &Screen, new: &Screen) {
@@ -441,7 +441,7 @@ fn diff_reproduces_target_frames() {
         s.bold = true;
     });
     c.write_str(2, 3, "warn!", red);
-    c.cursor = (3, 0);
+    c.set_cursor(Cursor::new(3, 0));
     check_diff(&b, &c);
 
     // style-only change on existing text
@@ -466,7 +466,7 @@ fn render_full_reproduces_frame_from_any_prior_state() {
 
     let mut target = Screen::new(3, 8);
     target.write_str(1, 1, "ok", style(|s| s.underline = true));
-    target.cursor = (1, 3);
+    target.set_cursor(Cursor::new(1, 3));
 
     let mut replay = garbage.clone();
     apply(&mut replay, &target.render_full());
