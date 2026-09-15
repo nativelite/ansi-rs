@@ -109,18 +109,45 @@ impl Cursor {
 }
 
 /// A `rows x cols` grid of [`Cell`]s plus a [`Cursor`], both 0-based.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Screen {
     rows: usize,
     cols: usize,
     /// Row-major, and exactly `rows * cols` long: sized by [`Screen::new`] and
     /// never grown or shrunk afterwards (`clear` refills in place, `set` and
     /// `copy_cells` overwrite in bounds). The indexers check it in debug builds.
+    ///
+    /// Rows are stored as a **ring**: logical row `r` lives at physical row
+    /// `(origin + r) % rows`, so scrolling the whole screen moves `origin`
+    /// instead of every cell. Nothing outside [`Screen::index`] knows this.
     cells: Vec<Cell>,
+    /// The physical row holding logical row 0. See `cells`.
+    origin: usize,
     /// Where the cursor should rest after rendering. Always on the grid (see
     /// [`Screen::set_cursor`]).
     cursor: Cursor,
 }
+
+/// Two screens are equal when they *show* the same thing: same size, same
+/// cursor, same cell at every logical position. Where each row physically sits
+/// in the ring is an implementation detail, so a scrolled screen and a freshly
+/// built one with the same content compare equal.
+impl PartialEq for Screen {
+    fn eq(&self, other: &Self) -> bool {
+        if self.rows != other.rows || self.cols != other.cols || self.cursor != other.cursor {
+            return false;
+        }
+        if self.origin == other.origin {
+            return self.cells == other.cells;
+        }
+        (0..self.rows).all(|r| {
+            let (a, b) = (self.row_slice(r), other.row_slice(r));
+            a == b
+        })
+    }
+}
+
+impl Eq for Screen {}
 
 impl Screen {
     /// A blank screen (all default cells, cursor at the origin).
@@ -129,6 +156,7 @@ impl Screen {
             rows,
             cols,
             cells: vec![Cell::default(); rows * cols],
+            origin: 0,
             cursor: Cursor::default(),
         }
     }
@@ -163,15 +191,36 @@ impl Screen {
     /// right size; use [`Screen::new`] when the size changes.
     pub fn clear(&mut self) {
         self.cells.fill(Cell::default());
+        self.origin = 0;
         self.cursor = Cursor::default();
     }
 
     /// The flat index of `(row, col)`, which the caller has bounds-checked.
+    /// Logical row `row` sits at physical row `(origin + row) % rows`.
     #[inline]
     fn index(&self, row: usize, col: usize) -> usize {
         debug_assert_eq!(self.cells.len(), self.rows * self.cols);
         debug_assert!(row < self.rows && col < self.cols);
-        row * self.cols + col
+        self.physical(row) * self.cols + col
+    }
+
+    /// The physical row holding logical `row`.
+    #[inline]
+    fn physical(&self, row: usize) -> usize {
+        debug_assert!(self.rows > 0);
+        let r = self.origin + row;
+        if r >= self.rows {
+            r - self.rows
+        } else {
+            r
+        }
+    }
+
+    /// One logical row's cells, contiguous in the ring.
+    #[inline]
+    fn row_slice(&self, row: usize) -> &[Cell] {
+        let start = self.physical(row) * self.cols;
+        &self.cells[start..start + self.cols]
     }
 
     /// The cell at `(row, col)`; out of bounds returns a default cell.
@@ -220,19 +269,49 @@ impl Screen {
     /// outside the region are untouched. An empty or out-of-range region does
     /// nothing, and `n` is clamped to the region's height.
     ///
-    /// This is one block move and one fill, not a per-cell copy. A terminal
-    /// scrolls on every line of output, and copying the region cell by cell cost
-    /// `rows x cols` bounds-checked reads and writes per line: vterm fed a 16 MB
-    /// log at 11 MB/s on a 40x160 grid, and slower on bigger grids.
+    /// Scrolling the **whole** screen (the common case: output arriving at the
+    /// bottom) only moves the ring's origin and clears the rows that come in,
+    /// which costs `n x cols`, not `rows x cols`. A smaller region moves its
+    /// rows, one block move each.
+    ///
+    /// A terminal scrolls on every output line, and copying the region cell by
+    /// cell cost `rows x cols` bounds-checked reads and writes per line: vterm
+    /// fed a 16 MB log at 11 MB/s on a 40x160 grid, and slower on bigger grids.
     pub fn scroll_rows_up(&mut self, top: usize, bottom: usize, n: usize, fill: Cell) {
         if top > bottom || bottom >= self.rows || n == 0 {
             return;
         }
         let n = n.min(bottom - top + 1);
-        let cols = self.cols;
-        let (start, end) = (top * cols, (bottom + 1) * cols);
-        self.cells.copy_within(start + n * cols..end, start);
-        self.cells[end - n * cols..end].fill(fill);
+        if top == 0 && bottom == self.rows - 1 {
+            self.origin = self.physical(n);
+            for r in self.rows - n..self.rows {
+                self.fill_row(r, fill);
+            }
+            return;
+        }
+        // Nothing survives when the shift covers the region; only the fill runs.
+        if n <= bottom - top {
+            for r in top..=bottom - n {
+                self.copy_row(r + n, r);
+            }
+        }
+        for r in bottom + 1 - n..=bottom {
+            self.fill_row(r, fill);
+        }
+    }
+
+    /// Copy logical row `from` over logical row `to`.
+    #[inline]
+    fn copy_row(&mut self, from: usize, to: usize) {
+        let (src, dst) = (self.index(from, 0), self.index(to, 0));
+        self.cells.copy_within(src..src + self.cols, dst);
+    }
+
+    /// Fill one logical row with `fill`.
+    #[inline]
+    fn fill_row(&mut self, row: usize, fill: Cell) {
+        let start = self.index(row, 0);
+        self.cells[start..start + self.cols].fill(fill);
     }
 
     /// Scroll rows `top..=bottom` down by `n`: the mirror of
@@ -243,11 +322,19 @@ impl Screen {
             return;
         }
         let n = n.min(bottom - top + 1);
-        let cols = self.cols;
-        let (start, end) = (top * cols, (bottom + 1) * cols);
-        self.cells
-            .copy_within(start..end - n * cols, start + n * cols);
-        self.cells[start..start + n * cols].fill(fill);
+        if top == 0 && bottom == self.rows - 1 {
+            self.origin = self.physical(self.rows - n);
+            for r in 0..n {
+                self.fill_row(r, fill);
+            }
+            return;
+        }
+        for r in (top + n..=bottom).rev() {
+            self.copy_row(r - n, r);
+        }
+        for r in top..top + n {
+            self.fill_row(r, fill);
+        }
     }
 
     /// The bytes that transform a terminal currently showing `self` into one
@@ -433,6 +520,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The ring is invisible: a screen scrolled into a state equals a screen
+    /// built that way, its rows read back in order, and a clear resets it.
+    #[test]
+    fn the_row_ring_is_invisible_to_readers() {
+        let fill = Cell::new(' ', Style::default());
+        let mut s = numbered(4, 3);
+        // Scroll a whole screen's worth and then some, so origin wraps.
+        for _ in 0..7 {
+            s.scroll_rows_up(0, 3, 1, fill);
+        }
+        let blank = Screen::new(4, 3);
+        assert_eq!(s, blank, "everything scrolled off: a blank screen");
+
+        let mut s = numbered(4, 3);
+        s.scroll_rows_up(0, 3, 2, fill);
+        let mut want = Screen::new(4, 3);
+        for r in 0..2 {
+            for c in 0..3 {
+                want.set(r, c, numbered(4, 3).cell(r + 2, c));
+            }
+        }
+        assert_eq!(s, want, "two rows up, two blank rows in");
+        assert_eq!(s.render_full(), want.render_full(), "same bytes");
+
+        // A wrapped ring still writes, reads and clears by logical position.
+        s.set(0, 0, Cell::new('A', Style::default()));
+        assert_eq!(s.cell(0, 0).ch, 'A');
+        s.clear();
+        assert_eq!(s, Screen::new(4, 3));
     }
 
     #[test]
