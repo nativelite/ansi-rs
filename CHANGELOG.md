@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-15
+
+Scrolling, which a terminal does on nearly every line of output, no longer
+costs a copy of the screen.
+
+### Added
+- **`Screen::scroll_rows_up` / `scroll_rows_down`.** Scroll rows `top..=bottom`
+  by `n` and fill what comes in — the operation an emulator needs for `IND`,
+  `RI`, `SU`, `SD` and a newline at the bottom of a scroll region. Callers used
+  to do it cell by cell.
+
+### Changed
+- **Scrolling the whole screen is `O(cols)`, not `O(rows x cols)`.** Rows are
+  stored as a ring, so a full-screen scroll — the common case, output arriving
+  at the bottom — advances an origin and clears the rows coming in instead of
+  moving every cell. A smaller region is one block move per row. Measured by
+  feeding 16 MB of coloured log output through `nativelite-vterm`: 11.0 → 66.0
+  MB/s at 40x160, and 5.3 → 63.8 MB/s at 60x240, where the cost no longer
+  grows with the grid.
+- `Screen`'s `PartialEq` is hand-written rather than derived, so the ring's
+  position stays invisible: two screens are equal when they *show* the same
+  thing. A scrolled screen equals a freshly built one with the same contents,
+  exactly as before.
+
 ## [0.3.0] - 2026-09-14
 
 Breaking: the double-width model and the cursor are typed.
