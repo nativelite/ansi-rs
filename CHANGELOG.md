@@ -49,6 +49,21 @@ Breaking: the double-width model and the cursor are typed.
 - README no longer claims `Screen` has no double-width support (it has since
   0.2.0).
 
+## [0.2.0] - 2026-09-12
+
+### Added
+- **Double-width cells.** `Cell` gains a `width` field (0 = continuation, 1, 2)
+  with the constructors `Cell::new`, `Cell::wide` and `Cell::continuation`. A
+  wide glyph is a lead cell plus a continuation cell; the diff emits the glyph
+  once and advances the cursor by two.
+- **`Screen::copy_cells`**, which writes a slice of cells into a row.
+- **`Screen::clear`**, which resets every cell and the cursor in place without
+  reallocating.
+
+### Changed
+- The diff emits one erase-to-end-of-line (`CSI K`) when a row's tail turns
+  blank, instead of writing each blank cell. `render_full` is unchanged.
+
 ## [0.1.0] - 2026-08-28
 
 ### Added
@@ -75,6 +90,8 @@ Breaking: the double-width model and the cursor are typed.
 Second crate in the nativelite **agent terminal** suite (see
 `roadmap/agent-terminal-suite.md` in `nativelite/ops`).
 
-[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/nativelite/ansi-rs/compare/v0.1.0...v0.3.0
+[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/nativelite/ansi-rs/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/nativelite/ansi-rs/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/nativelite/ansi-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nativelite/ansi-rs/releases/tag/v0.1.0
