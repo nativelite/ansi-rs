@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-22
+
 ### Added
 - **`Parser::feed_with`, tokenizing without allocation.** The same state
   machine as `feed`, but it hands a closure borrowed `Event`s: text runs point
@@ -24,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numerically into a fixed array instead of being collected as bytes and
   re-parsed at dispatch, intermediates likewise, and an OSC/DCS payload buffer
   is cleared and reused rather than taken.
+- **`Utf8Decoder`,** the piece a `feed_with` consumer needs: it turns raw
+  `Event::Text` bytes into `str` pieces, carries a character split across
+  chunks, and renders invalid bytes as U+FFFD. An ASCII run is handed over
+  borrowed, so it allocates nothing. `feed` uses it too, so both paths decode
+  identically.
 
 ## [0.3.1] - 2026-09-15
 
@@ -108,7 +115,8 @@ Breaking: the double-width model and the cursor are typed.
 Second crate in the nativelite **agent terminal** suite (see
 `roadmap/agent-terminal-suite.md` in `nativelite/ops`).
 
-[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nativelite/ansi-rs/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nativelite/ansi-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nativelite/ansi-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nativelite/ansi-rs/compare/v0.1.0...v0.2.0

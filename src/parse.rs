@@ -141,7 +141,7 @@ pub struct Parser {
     str_data: Vec<u8>,
     str_esc: bool,
     // Used only by `feed`: a UTF-8 character split across calls.
-    pending_utf8: Vec<u8>,
+    decoder: Utf8Decoder,
 }
 
 impl Parser {
@@ -267,16 +267,12 @@ impl Parser {
     pub fn feed(&mut self, input: &[u8]) -> Vec<Token> {
         let mut out = Vec::new();
         let mut text = String::new();
-        let mut pending = std::mem::take(&mut self.pending_utf8);
+        let mut decoder = std::mem::take(&mut self.decoder);
 
         self.feed_with(input, |event| match event {
-            Event::Text(bytes) => decode_text(bytes, &mut pending, &mut text),
+            Event::Text(bytes) => decoder.decode(bytes, |s| text.push_str(s)),
             other => {
-                if !pending.is_empty() {
-                    // A truncated UTF-8 sequence: the held bytes were invalid.
-                    text.push('\u{FFFD}');
-                    pending.clear();
-                }
+                decoder.flush_incomplete(|s| text.push_str(s));
                 if !text.is_empty() {
                     out.push(Token::Text(std::mem::take(&mut text)));
                 }
@@ -287,7 +283,7 @@ impl Parser {
         if !text.is_empty() {
             out.push(Token::Text(text));
         }
-        self.pending_utf8 = pending;
+        self.decoder = decoder;
         out
     }
 
@@ -411,40 +407,110 @@ fn own(event: Event<'_>) -> Token {
     }
 }
 
-/// Append raw text bytes to `text` as UTF-8, holding a character split across
-/// calls in `pending` and replacing anything invalid with U+FFFD.
-fn decode_text(bytes: &[u8], pending: &mut Vec<u8>, text: &mut String) {
-    for &b in bytes {
-        if !pending.is_empty() {
-            if (0x80..0xC0).contains(&b) {
-                pending.push(b);
-                if pending.len() == utf8_len(pending[0]) {
-                    match std::str::from_utf8(pending) {
-                        Ok(s) => text.push_str(s),
-                        Err(_) => text.push('\u{FFFD}'),
+/// Decodes [`Event::Text`] bytes into `str` pieces, across chunk boundaries.
+///
+/// [`Event::Text`] is raw bytes, because the parser never copies them. A
+/// consumer that wants characters needs two things this handles: a multi-byte
+/// character split across two `feed_with` calls, and invalid bytes, which
+/// become U+FFFD exactly as [`Parser::feed`] renders them.
+///
+/// Pieces are borrowed: an ASCII run is handed over as one slice of the input
+/// with nothing copied, and only a character straddling a boundary is
+/// assembled in the decoder's own four bytes. It allocates nothing, ever.
+///
+/// ```
+/// # use ansi::{Event, Parser, Utf8Decoder};
+/// let mut parser = Parser::new();
+/// let mut decoder = Utf8Decoder::new();
+/// let mut seen = String::new();
+/// // The 'é' is split across the two chunks.
+/// for chunk in [&b"caf\xC3"[..], &b"\xA9!"[..]] {
+///     parser.feed_with(chunk, |event| match event {
+///         Event::Text(bytes) => decoder.decode(bytes, |s| seen.push_str(s)),
+///         _ => decoder.flush_incomplete(|s| seen.push_str(s)),
+///     });
+/// }
+/// assert_eq!(seen, "café!");
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct Utf8Decoder {
+    partial: [u8; 4],
+    len: usize,
+}
+
+impl Utf8Decoder {
+    /// A decoder with nothing held over.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode `bytes`, calling `f` with each piece of text in order.
+    ///
+    /// A character left incomplete at the end is held for the next call.
+    pub fn decode<F: FnMut(&str)>(&mut self, bytes: &[u8], mut f: F) {
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if self.len > 0 {
+                if (0x80..0xC0).contains(&b) {
+                    self.partial[self.len] = b;
+                    self.len += 1;
+                    i += 1;
+                    if self.len == utf8_len(self.partial[0]) {
+                        match std::str::from_utf8(&self.partial[..self.len]) {
+                            Ok(s) => f(s),
+                            Err(_) => f(REPLACEMENT), // overlong, surrogate, out of range
+                        }
+                        self.len = 0;
                     }
-                    pending.clear();
+                    continue;
+                }
+                // Truncated sequence: the held bytes were invalid.
+                self.len = 0;
+                f(REPLACEMENT);
+                // fall through and process `b` normally
+            }
+            if b < 0x80 {
+                // An ASCII run is already valid UTF-8: hand it over borrowed.
+                let start = i;
+                while i < bytes.len() && bytes[i] < 0x80 {
+                    i += 1;
+                }
+                match std::str::from_utf8(&bytes[start..i]) {
+                    Ok(s) => f(s),
+                    Err(_) => unreachable!("bytes below 0x80 are valid UTF-8"),
                 }
                 continue;
             }
-            // Truncated sequence: the pending bytes were invalid.
-            text.push('\u{FFFD}');
-            pending.clear();
-            // fall through to process `b` normally
-        }
-        match b {
-            0x20..=0x7E => text.push(b as char),
-            0x80..=0xBF => text.push('\u{FFFD}'), // stray continuation
-            _ => {
-                if utf8_len(b) == 1 {
-                    text.push('\u{FFFD}'); // invalid lead (0xF8+)
-                } else {
-                    pending.push(b);
-                }
+            i += 1;
+            if b < 0xC0 || utf8_len(b) == 1 {
+                f(REPLACEMENT); // stray continuation, or an invalid lead (0xF8+)
+            } else {
+                self.partial[0] = b;
+                self.len = 1;
             }
         }
     }
+
+    /// Give up on a character left incomplete, emitting U+FFFD for it.
+    ///
+    /// Call this when something other than text arrives — a control byte or an
+    /// escape sequence ends a text run, and the held bytes can never be
+    /// completed. Does nothing when no character is pending.
+    pub fn flush_incomplete<F: FnMut(&str)>(&mut self, mut f: F) {
+        if self.len > 0 {
+            self.len = 0;
+            f(REPLACEMENT);
+        }
+    }
+
+    /// True when a partial character is held for the next [`decode`](Self::decode).
+    pub fn is_pending(&self) -> bool {
+        self.len > 0
+    }
 }
+
+const REPLACEMENT: &str = "\u{FFFD}";
 
 /// Expected total length of a UTF-8 sequence from its lead byte (1 for
 /// invalid leads, so they consume exactly themselves).
