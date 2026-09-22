@@ -117,12 +117,13 @@ pub struct Screen {
     /// never grown or shrunk afterwards (`clear` refills in place, `set` and
     /// `copy_cells` overwrite in bounds). The indexers check it in debug builds.
     ///
-    /// Rows are stored as a **ring**: logical row `r` lives at physical row
-    /// `(origin + r) % rows`, so scrolling the whole screen moves `origin`
-    /// instead of every cell. Nothing outside [`Screen::index`] knows this.
+    /// Rows are reached through a **row map**: logical row `r` lives at
+    /// physical row `map[r]`, so scrolling any region rotates a few row
+    /// indices instead of moving cells. Nothing outside [`Screen::index`]
+    /// knows this.
     cells: Vec<Cell>,
-    /// The physical row holding logical row 0. See `cells`.
-    origin: usize,
+    /// Logical row to physical row; always a permutation of `0..rows`.
+    map: Vec<usize>,
     /// Where the cursor should rest after rendering. Always on the grid (see
     /// [`Screen::set_cursor`]).
     cursor: Cursor,
@@ -137,7 +138,7 @@ impl PartialEq for Screen {
         if self.rows != other.rows || self.cols != other.cols || self.cursor != other.cursor {
             return false;
         }
-        if self.origin == other.origin {
+        if self.map == other.map {
             return self.cells == other.cells;
         }
         (0..self.rows).all(|r| {
@@ -156,7 +157,7 @@ impl Screen {
             rows,
             cols,
             cells: vec![Cell::default(); rows * cols],
-            origin: 0,
+            map: (0..rows).collect(),
             cursor: Cursor::default(),
         }
     }
@@ -191,12 +192,14 @@ impl Screen {
     /// right size; use [`Screen::new`] when the size changes.
     pub fn clear(&mut self) {
         self.cells.fill(Cell::default());
-        self.origin = 0;
+        for (r, m) in self.map.iter_mut().enumerate() {
+            *m = r;
+        }
         self.cursor = Cursor::default();
     }
 
     /// The flat index of `(row, col)`, which the caller has bounds-checked.
-    /// Logical row `row` sits at physical row `(origin + row) % rows`.
+    /// Logical row `row` sits at physical row `map[row]`.
     #[inline]
     fn index(&self, row: usize, col: usize) -> usize {
         debug_assert_eq!(self.cells.len(), self.rows * self.cols);
@@ -207,13 +210,7 @@ impl Screen {
     /// The physical row holding logical `row`.
     #[inline]
     fn physical(&self, row: usize) -> usize {
-        debug_assert!(self.rows > 0);
-        let r = self.origin + row;
-        if r >= self.rows {
-            r - self.rows
-        } else {
-            r
-        }
+        self.map[row]
     }
 
     /// One logical row's cells, contiguous in the ring.
@@ -269,42 +266,23 @@ impl Screen {
     /// outside the region are untouched. An empty or out-of-range region does
     /// nothing, and `n` is clamped to the region's height.
     ///
-    /// Scrolling the **whole** screen (the common case: output arriving at the
-    /// bottom) only moves the ring's origin and clears the rows that come in,
-    /// which costs `n x cols`, not `rows x cols`. A smaller region moves its
-    /// rows, one block move each.
+    /// Any region, the whole screen included, scrolls by rotating its entries
+    /// in the row map and clearing the rows that come in: `region` index moves
+    /// plus `n x cols` cells, never `region x cols`.
     ///
-    /// A terminal scrolls on every output line, and copying the region cell by
-    /// cell cost `rows x cols` bounds-checked reads and writes per line: vterm
-    /// fed a 16 MB log at 11 MB/s on a 40x160 grid, and slower on bigger grids.
+    /// A terminal scrolls on every output line. Copying the region cell by cell
+    /// fed a 16 MB log at 11 MB/s on a 40x160 grid; moving whole rows still
+    /// held a 177x47 pane with a one-row status line (`DECSTBM`) to 21 MiB/s,
+    /// against 182 MiB/s scrolling the full screen.
     pub fn scroll_rows_up(&mut self, top: usize, bottom: usize, n: usize, fill: Cell) {
         if top > bottom || bottom >= self.rows || n == 0 {
             return;
         }
         let n = n.min(bottom - top + 1);
-        if top == 0 && bottom == self.rows - 1 {
-            self.origin = self.physical(n);
-            for r in self.rows - n..self.rows {
-                self.fill_row(r, fill);
-            }
-            return;
-        }
-        // Nothing survives when the shift covers the region; only the fill runs.
-        if n <= bottom - top {
-            for r in top..=bottom - n {
-                self.copy_row(r + n, r);
-            }
-        }
+        self.map[top..=bottom].rotate_left(n);
         for r in bottom + 1 - n..=bottom {
             self.fill_row(r, fill);
         }
-    }
-
-    /// Copy logical row `from` over logical row `to`.
-    #[inline]
-    fn copy_row(&mut self, from: usize, to: usize) {
-        let (src, dst) = (self.index(from, 0), self.index(to, 0));
-        self.cells.copy_within(src..src + self.cols, dst);
     }
 
     /// Fill one logical row with `fill`.
@@ -322,16 +300,7 @@ impl Screen {
             return;
         }
         let n = n.min(bottom - top + 1);
-        if top == 0 && bottom == self.rows - 1 {
-            self.origin = self.physical(self.rows - n);
-            for r in 0..n {
-                self.fill_row(r, fill);
-            }
-            return;
-        }
-        for r in (top + n..=bottom).rev() {
-            self.copy_row(r - n, r);
-        }
+        self.map[top..=bottom].rotate_right(n);
         for r in top..top + n {
             self.fill_row(r, fill);
         }
@@ -551,6 +520,49 @@ mod tests {
         assert_eq!(s.cell(0, 0).ch, 'A');
         s.clear();
         assert_eq!(s, Screen::new(4, 3));
+    }
+
+    /// Long random mixes of full-screen scrolls, region scrolls (up and down)
+    /// and writes agree with the per-cell reference at every step, so the row
+    /// map stays a faithful permutation however it has been rotated.
+    #[test]
+    fn mixed_scrolls_and_writes_match_the_reference_over_many_steps() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for (rows, cols) in [(1, 3), (6, 5), (24, 9)] {
+            let (mut fast, mut slow) = (numbered(rows, cols), numbered(rows, cols));
+            for step in 0..2_000 {
+                let fill = Cell::new(char::from(b'a' + (step % 26) as u8), Style::default());
+                let (top, bottom) = if next(3) == 0 {
+                    (0, rows - 1)
+                } else {
+                    let a = next(rows);
+                    (a, a + next(rows - a))
+                };
+                let n = 1 + next(3);
+                match next(4) {
+                    0 => {
+                        fast.scroll_rows_up(top, bottom, n, fill);
+                        reference_up(&mut slow, top, bottom, n, fill);
+                    }
+                    1 => {
+                        fast.scroll_rows_down(top, bottom, n, fill);
+                        reference_down(&mut slow, top, bottom, n, fill);
+                    }
+                    _ => {
+                        let (r, c) = (next(rows), next(cols));
+                        fast.set(r, c, fill);
+                        slow.set(r, c, fill);
+                    }
+                }
+                assert_eq!(fast, slow, "{rows}x{cols}, step {step}");
+            }
+        }
     }
 
     #[test]

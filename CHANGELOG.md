@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without saving the parser's internals, since a fresh `Parser` is then
   indistinguishable from the running one.
 
+### Changed
+- **Scrolling a region is as cheap as scrolling the whole screen.** `Screen`
+  now reaches rows through a row map instead of a ring origin, so
+  `scroll_rows_up` / `scroll_rows_down` rotate row indices for any region
+  rather than moving the region's cells. A 177x47 terminal with a one-row
+  status line (`DECSTBM`) went from 21 to ~176 MiB/s, level with a full-screen
+  scroll. No API change.
+
 ## [0.4.0] - 2026-09-22
 
 ### Added
