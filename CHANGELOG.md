@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`Parser::feed_with`, tokenizing without allocation.** The same state
+  machine as `feed`, but it hands a closure borrowed `Event`s: text runs point
+  into the caller's buffer, sequence payloads into scratch the parser reuses.
+  Nothing is allocated per token. Measured on foldwave's `fwbench parse`
+  (agent-like output, one i5-12600K P-core, 64 MiB, 5 reps): **192.5 -> 876.3
+  MiB/s, 4.6x**. `Event` is exported alongside `Token`.
+
+### Changed
+- **`feed` is now built on `feed_with`** instead of being a second copy of the
+  state machine, so the two can no longer drift. Its behaviour is unchanged:
+  the existing suite passes untouched, and a new property test feeds a corpus
+  at *every* chunk split and compares the two paths token for token.
+- **Sequence payloads no longer reallocate.** CSI parameters accumulate
+  numerically into a fixed array instead of being collected as bytes and
+  re-parsed at dispatch, intermediates likewise, and an OSC/DCS payload buffer
+  is cleared and reused rather than taken.
+
 ## [0.3.1] - 2026-09-15
 
 Scrolling, which a terminal does on nearly every line of output, no longer

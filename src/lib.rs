@@ -9,6 +9,8 @@
 //! * **Parse** a terminal byte stream incrementally: [`Parser::feed`] accepts
 //!   chunks split at *any* byte boundary (mid-escape, mid-UTF-8) and yields
 //!   [`Token`]s (text runs, C0 controls, CSI/ESC/OSC sequences).
+//!   [`Parser::feed_with`] is the same machine without the allocation: it
+//!   hands a closure borrowed [`Event`]s instead.
 //! * **Render by diff**: [`Screen`] is a grid of styled [`Cell`]s;
 //!   [`Screen::diff`] emits the minimal cursor-move/SGR/text bytes that turn
 //!   one screen into another, and [`Screen::render_full`] repaints from
@@ -33,6 +35,6 @@ mod parse;
 mod screen;
 mod style;
 
-pub use parse::{Parser, Token};
+pub use parse::{Event, Parser, Token};
 pub use screen::{Cell, CellWidth, Cursor, Screen};
 pub use style::{Color, Style};
