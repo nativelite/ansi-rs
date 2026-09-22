@@ -150,6 +150,18 @@ impl Parser {
         Self::default()
     }
 
+    /// True when no escape sequence or string is in progress: the next byte
+    /// starts fresh. A consumer that snapshots its own state (a terminal
+    /// checkpoint) can do so here without saving the parser's internals,
+    /// because a fresh `Parser` is then indistinguishable from this one.
+    ///
+    /// UTF-8 is not the parser's concern in [`feed_with`](Parser::feed_with)
+    /// (text arrives as raw bytes); a caller decoding text checks its
+    /// [`Utf8Decoder`] as well.
+    pub fn is_ground(&self) -> bool {
+        self.state == State::Ground
+    }
+
     /// Tokenize `input`, calling `f` once per [`Event`], allocating nothing.
     ///
     /// Partial sequences are held for the next call. A text run in progress is
@@ -693,6 +705,25 @@ mod tests {
             }
         );
         assert_eq!(seen[2], Token::Osc("0;t".into()));
+    }
+
+    #[test]
+    fn is_ground_is_false_exactly_while_a_sequence_is_open() {
+        let mut p = Parser::new();
+        assert!(p.is_ground());
+        let steps: [(&[u8], bool); 7] = [
+            (b"text", true),
+            (b"", false),
+            (b"[1;3", false),
+            (b"1m", true),
+            (b"]0;title", false),
+            (b"", true),
+            (b"P", false),
+        ];
+        for (chunk, ground) in steps {
+            p.feed_with(chunk, |_| {});
+            assert_eq!(p.is_ground(), ground, "after {chunk:?}");
+        }
     }
 
     #[test]

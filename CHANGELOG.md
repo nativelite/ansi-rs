@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`Parser::is_ground()`**: true when no escape sequence or string is open. A
+  consumer that snapshots its own state (a terminal checkpoint) can do so there
+  without saving the parser's internals, since a fresh `Parser` is then
+  indistinguishable from the running one.
+
 ## [0.4.0] - 2026-09-22
 
 ### Added
