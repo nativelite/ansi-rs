@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`MarkScanner`: shell-integration marks without a full parse.** Finds
+  OSC 133 (and VS Code's OSC 633) prompt-start, command-start, output-start
+  and command-end sequences, with the exit code, in a raw byte stream fed in
+  any chunking, reporting each mark's stream offset. Needs no parser or screen,
+  so it can run over output nobody is viewing.
 - **`Parser::is_ground()`**: true when no escape sequence or string is open. A
   consumer that snapshots its own state (a terminal checkpoint) can do so there
   without saving the parser's internals, since a fresh `Parser` is then
