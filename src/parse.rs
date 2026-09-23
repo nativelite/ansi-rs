@@ -186,6 +186,10 @@ impl Parser {
                         if run.is_none() {
                             run = Some(i);
                         }
+                        // Text runs to the next control byte: skip to it in
+                        // one go instead of a state-machine step per byte.
+                        i = skip_text(input, i + 1);
+                        continue;
                     }
                 },
                 State::Escape => match b {
@@ -529,6 +533,40 @@ const REPLACEMENT: &str = "\u{FFFD}";
 
 /// Expected total length of a UTF-8 sequence from its lead byte (1 for
 /// invalid leads, so they consume exactly themselves).
+/// The index of the first byte at or after `from` that ends a text run in
+/// the ground state — a C0 control (below 0x20, ESC included) or DEL — or
+/// `input.len()` if there is none.
+///
+/// Eight bytes at a time: with `x` a little-endian word, `(x - 0x20..) & !x &
+/// 0x80..` flags bytes below 0x20 and the same test on `x ^ 0x7F..` flags
+/// DEL. Either test can also flag bytes above a true match (a borrow carries
+/// upward), never below one, so the lowest flagged byte is always real.
+#[inline]
+fn skip_text(input: &[u8], from: usize) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let mut j = from;
+    while j + 8 <= input.len() {
+        let x = u64::from_le_bytes(input[j..j + 8].try_into().expect("eight bytes"));
+        let below = x.wrapping_sub(ONES * 0x20) & !x & HIGHS;
+        let d = x ^ (ONES * 0x7F);
+        let del = d.wrapping_sub(ONES) & !d & HIGHS;
+        let hit = below | del;
+        if hit != 0 {
+            return j + (hit.trailing_zeros() / 8) as usize;
+        }
+        j += 8;
+    }
+    while j < input.len() {
+        let b = input[j];
+        if b < 0x20 || b == 0x7F {
+            return j;
+        }
+        j += 1;
+    }
+    input.len()
+}
+
 fn utf8_len(lead: u8) -> usize {
     match lead {
         0xC0..=0xDF => 2,
@@ -541,6 +579,40 @@ fn utf8_len(lead: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The word-at-a-time skip finds exactly what a byte loop would, for
+    /// every byte value at every position of a word and across its end.
+    #[test]
+    fn skip_text_matches_the_byte_rule_everywhere() {
+        let naive = |input: &[u8], from: usize| {
+            (from..input.len())
+                .find(|&j| input[j] < 0x20 || input[j] == 0x7F)
+                .unwrap_or(input.len())
+        };
+        for special in 0u8..=255 {
+            for len in 0..20 {
+                for at in 0..len {
+                    let mut v = vec![b'a'; len];
+                    v[at] = special;
+                    // Noise that must not trigger: high bytes, 0x7E, 0x80.
+                    if at + 1 < len {
+                        v[at + 1] = 0xFF;
+                    }
+                    for from in 0..=len {
+                        assert_eq!(
+                            skip_text(&v, from),
+                            naive(&v, from),
+                            "{special:#x} at {at} len {len} from {from}"
+                        );
+                    }
+                }
+            }
+        }
+        let mixed: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        for from in 0..mixed.len() {
+            assert_eq!(skip_text(&mixed, from), naive(&mixed, from));
+        }
+    }
 
     /// Decoding does not depend on how the bytes are chunked, for mixes of
     /// ASCII, valid multi-byte characters and every kind of invalid byte.

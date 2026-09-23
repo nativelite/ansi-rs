@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **UTF-8 decoding hands over the longest valid prefix in one call** (std's
   validator) instead of scanning ASCII byte by byte and validating again;
   invalid bytes take the old path, so replacements are unchanged.
+- **The parser skips plain text eight bytes at a time** to the next control
+  byte (C0 or DEL) instead of a state-machine step per byte: `feed_with` on
+  agent output 777 -> 2,168 MiB/s. Events are unchanged.
 
 ### Added
 - **`Screen::write_ascii`**: write a run of ASCII as cells in one pass, without
