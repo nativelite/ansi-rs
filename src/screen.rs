@@ -113,8 +113,9 @@ impl Cursor {
 pub struct Screen {
     rows: usize,
     cols: usize,
-    /// Row-major, and exactly `rows * cols` long: sized by [`Screen::new`] and
-    /// never grown or shrunk afterwards (`clear` refills in place, `set` and
+    /// Row-major, and exactly `(rows + history) * cols` long: sized by
+    /// [`Screen::new`] / [`Screen::with_history`] and never grown or shrunk
+    /// afterwards (`clear` refills in place, `set` and
     /// `copy_cells` overwrite in bounds). The indexers check it in debug builds.
     ///
     /// Rows are reached through a **row map**: logical row `r` lives at
@@ -128,8 +129,22 @@ pub struct Screen {
     /// (O(1)), where filling every cell cost ~half of all emulation time on a
     /// 177-column pane of short agent lines. Writes fill any gap first.
     cells: Vec<Cell>,
-    /// Logical row to physical row; always a permutation of `0..rows`.
+    /// Logical row to physical row: `rows` distinct physical rows. With
+    /// history, the rest of the physical rows are in `hist` or `spare`.
     map: Vec<usize>,
+    /// **Scrollback, as a ring of physical rows.** When the whole screen
+    /// scrolls up, the row leaving the top joins this ring (newest last) and
+    /// the ring's oldest row, or a spare one, becomes the new bottom row,
+    /// lazily blank. No cell is copied. Capacity `history`; 0 keeps none.
+    hist: Vec<usize>,
+    hist_head: usize,
+    hist_len: usize,
+    history: usize,
+    /// Physical rows not yet used by the screen or the ring.
+    spare: Vec<usize>,
+    /// Lines that have ever entered the history (monotonic): lets a viewer
+    /// anchor on a line while output keeps scrolling.
+    scrolled: u64,
     /// Per physical row: how many leading cells are real.
     written: Vec<usize>,
     /// Per physical row: what every cell past `written` reads as.
@@ -157,15 +172,129 @@ impl Eq for Screen {}
 impl Screen {
     /// A blank screen (all default cells, cursor at the origin).
     pub fn new(rows: usize, cols: usize) -> Self {
+        Screen::with_history(rows, cols, 0)
+    }
+
+    /// A blank screen that keeps up to `history` lines scrolled off its top
+    /// (see [`Screen::history_len`]). Only a scroll of the whole screen feeds
+    /// the history, as in other terminals; a scroll region does not.
+    pub fn with_history(rows: usize, cols: usize, history: usize) -> Self {
+        let physical = rows + history;
         Screen {
             rows,
             cols,
-            cells: vec![Cell::default(); rows * cols],
+            cells: vec![Cell::default(); physical * cols],
             map: (0..rows).collect(),
-            written: vec![0; rows],
-            blank: vec![Cell::default(); rows],
+            hist: vec![0; history],
+            hist_head: 0,
+            hist_len: 0,
+            history,
+            spare: (rows..physical).rev().collect(),
+            scrolled: 0,
+            written: vec![0; physical],
+            blank: vec![Cell::default(); physical],
             cursor: Cursor::default(),
         }
+    }
+
+    /// The same visible rows and cursor, without the history: what a
+    /// renderer or a synchronized-output snapshot needs, at the cost of the
+    /// visible cells only.
+    pub fn visible(&self) -> Screen {
+        let mut s = Screen::new(self.rows, self.cols);
+        for r in 0..self.rows {
+            let p = self.map[r];
+            let w = self.written[p];
+            s.blank[r] = self.blank[p];
+            s.written[r] = w;
+            let (src, dst) = (p * self.cols, r * self.cols);
+            s.cells[dst..dst + w].copy_from_slice(&self.cells[src..src + w]);
+        }
+        s.cursor = self.cursor;
+        s
+    }
+
+    /// Lines of history held (at most the capacity given to
+    /// [`Screen::with_history`]).
+    pub fn history_len(&self) -> usize {
+        self.hist_len
+    }
+
+    /// The history capacity, in lines.
+    pub fn history_capacity(&self) -> usize {
+        self.history
+    }
+
+    /// Lines that have ever entered the history, including ones since
+    /// dropped: a monotonic count to anchor a scrolled-back view on.
+    pub fn scrolled_lines(&self) -> u64 {
+        self.scrolled
+    }
+
+    /// A cell of the history: `age` 0 is the line that most recently left
+    /// the top of the screen. Out of range returns a default cell.
+    pub fn history_cell(&self, age: usize, col: usize) -> Cell {
+        if age >= self.hist_len || col >= self.cols {
+            return Cell::default();
+        }
+        let p = self.hist[(self.hist_head + self.hist_len - 1 - age) % self.history];
+        if col < self.written[p] {
+            self.cells[p * self.cols + col]
+        } else {
+            self.blank[p]
+        }
+    }
+
+    /// Forget the history (as `ESC [3J` asks).
+    pub fn clear_history(&mut self) {
+        for i in 0..self.hist_len {
+            let p = self.hist[(self.hist_head + i) % self.history];
+            self.spare.push(p);
+        }
+        self.hist_head = 0;
+        self.hist_len = 0;
+    }
+
+    /// Copy `other`'s history (oldest first) into this screen's, each line
+    /// cut or padded to this width: used to keep scrollback across a resize.
+    pub fn copy_history_from(&mut self, other: &Screen) {
+        let cols = self.cols.min(other.cols);
+        for age in (0..other.hist_len).rev() {
+            let Some(p) = self.take_history_row() else {
+                return;
+            };
+            self.written[p] = 0;
+            self.blank[p] = Cell::default();
+            for c in 0..cols {
+                let cell = other.history_cell(age, c);
+                self.cells[p * self.cols + c] = cell;
+            }
+            self.written[p] = cols;
+            self.push_history(p);
+        }
+    }
+
+    /// A physical row free to become history: a spare one, else the oldest
+    /// history row (dropped). `None` with no history capacity.
+    fn take_history_row(&mut self) -> Option<usize> {
+        if self.history == 0 {
+            return None;
+        }
+        if let Some(p) = self.spare.pop() {
+            return Some(p);
+        }
+        let p = self.hist[self.hist_head];
+        self.hist_head = (self.hist_head + 1) % self.history;
+        self.hist_len -= 1;
+        Some(p)
+    }
+
+    /// Append physical row `p` as the newest history line.
+    fn push_history(&mut self, p: usize) {
+        let at = (self.hist_head + self.hist_len) % self.history;
+        self.hist[at] = p;
+        self.hist_len += 1;
+        self.scrolled += 1;
     }
 
     pub fn rows(&self) -> usize {
@@ -197,11 +326,10 @@ impl Screen {
     /// existing allocation. The caller must ensure the screen is already the
     /// right size; use [`Screen::new`] when the size changes.
     pub fn clear(&mut self) {
-        for (r, m) in self.map.iter_mut().enumerate() {
-            *m = r;
+        // Visible rows only; any history stays (see `clear_history`).
+        for r in 0..self.rows {
+            self.fill_row(r, Cell::default());
         }
-        self.written.iter_mut().for_each(|w| *w = 0);
-        self.blank.iter_mut().for_each(|b| *b = Cell::default());
         self.cursor = Cursor::default();
     }
 
@@ -209,7 +337,7 @@ impl Screen {
     /// Logical row `row` sits at physical row `map[row]`.
     #[inline]
     fn index(&self, row: usize, col: usize) -> usize {
-        debug_assert_eq!(self.cells.len(), self.rows * self.cols);
+        debug_assert_eq!(self.cells.len(), (self.rows + self.history) * self.cols);
         debug_assert!(row < self.rows && col < self.cols);
         self.physical(row) * self.cols + col
     }
@@ -324,6 +452,21 @@ impl Screen {
             return;
         }
         let n = n.min(bottom - top + 1);
+        if self.history > 0 && top == 0 && bottom == self.rows - 1 {
+            // The whole screen: each departing row joins the history, and a
+            // free (or the oldest) history row comes in at the bottom.
+            for _ in 0..n {
+                let Some(fresh) = self.take_history_row() else {
+                    break;
+                };
+                let leaving = self.map[0];
+                self.map.rotate_left(1);
+                self.map[self.rows - 1] = fresh;
+                self.fill_row(self.rows - 1, fill);
+                self.push_history(leaving);
+            }
+            return;
+        }
         self.map[top..=bottom].rotate_left(n);
         for r in bottom + 1 - n..=bottom {
             self.fill_row(r, fill);
@@ -631,6 +774,61 @@ mod tests {
         assert_eq!(a.cell(2, 0), fill, "the gap before the text keeps the fill");
         assert_eq!(a.write_ascii(3, 0, b"x", style), 0);
         assert_eq!(a.write_ascii(0, 8, b"x", style), 0);
+    }
+
+    /// A screen with history scrolls exactly like one without, and every line
+    /// that left the top is in the history, newest first, until the ring is
+    /// full and drops the oldest.
+    #[test]
+    fn history_keeps_what_scrolls_off_the_top() {
+        let fill = Cell::new(' ', Style::default());
+        let line = |k: usize| -> Vec<Cell> {
+            format!("line {k:03}")
+                .chars()
+                .map(|c| Cell::new(c, Style::default()))
+                .collect()
+        };
+        let (mut plain, mut hist) = (Screen::new(4, 10), Screen::with_history(4, 10, 5));
+        for k in 0..12 {
+            for s in [&mut plain, &mut hist] {
+                s.scroll_rows_up(0, 3, 1, fill);
+                s.copy_cells(3, 0, &line(k));
+            }
+            assert_eq!(
+                hist, plain,
+                "the visible screen is unchanged by history, step {k}"
+            );
+        }
+        // 12 scrolls: the 4 initial blank rows, then lines 0..=7, left the
+        // top (lines 8..=11 are on screen); the ring keeps the newest 5.
+        assert_eq!(hist.history_len(), 5);
+        assert_eq!(hist.scrolled_lines(), 12);
+        let text = |age| -> String { (0..8).map(|c| hist.history_cell(age, c).ch).collect() };
+        assert_eq!(text(0), "line 007");
+        assert_eq!(text(4), "line 003");
+        assert_eq!(hist.history_cell(5, 0), Cell::default(), "past the ring");
+        // A scroll region does not feed the history.
+        hist.scroll_rows_up(1, 3, 1, fill);
+        assert_eq!(hist.history_len(), 5);
+        assert_eq!(hist.scrolled_lines(), 12);
+        // visible() drops the history, keeps what shows.
+        let v = hist.visible();
+        assert_eq!(v, hist);
+        assert_eq!(v.history_len(), 0);
+        // History survives a copy into another size, cut to its width.
+        let mut wide = Screen::with_history(3, 6, 10);
+        wide.copy_history_from(&hist);
+        assert_eq!(wide.history_len(), 5);
+        let t: String = (0..6).map(|c| wide.history_cell(0, c).ch).collect();
+        assert_eq!(t, "line 0");
+        hist.clear_history();
+        assert_eq!(hist.history_len(), 0);
+        // After clearing, scrolling reuses the freed rows.
+        for k in 0..3 {
+            hist.scroll_rows_up(0, 3, 1, fill);
+            hist.copy_cells(3, 0, &line(100 + k));
+        }
+        assert_eq!(hist.history_len(), 3);
     }
 
     #[test]

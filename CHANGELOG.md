@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent output 777 -> 2,168 MiB/s. Events are unchanged.
 
 ### Added
+- **Scrollback: `Screen::with_history(rows, cols, lines)`** keeps up to
+  `lines` lines that scroll off the top of the whole screen, as a ring of the
+  screen's own rows: no cell is copied when a line leaves. Read with
+  `history_len`, `history_cell(age, col)` and `scrolled_lines` (a monotonic
+  count to anchor a view); `clear_history`, and `copy_history_from` to keep it
+  across a resize. `visible()` is the screen without its history. A scroll
+  region never feeds the history. `Screen::new` keeps none, as before.
 - **`Utf8Decoder::is_idle`**: true when no partial character is held, so a
   caller can pass plain ASCII straight through without decoding.
 - **`Screen::write_ascii`**: write a run of ASCII as cells in one pass, without
