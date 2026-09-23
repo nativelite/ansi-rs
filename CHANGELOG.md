@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than moving the region's cells. A 177x47 terminal with a one-row
   status line (`DECSTBM`) went from 21 to ~176 MiB/s, level with a full-screen
   scroll. No API change.
+- **Rows clear lazily.** A scrolled-in or cleared row no longer fills every
+  cell: each row records how far it has been written and what the rest reads
+  as. On a 177-column pane of short agent lines, filling rows had been ~half
+  of all emulation time. Through `vterm`: 188 -> 301 MiB/s.
+- **UTF-8 decoding hands over the longest valid prefix in one call** (std's
+  validator) instead of scanning ASCII byte by byte and validating again;
+  invalid bytes take the old path, so replacements are unchanged.
+
+### Added
+- **`Screen::write_ascii`**: write a run of ASCII as cells in one pass, without
+  building the cells first; `vterm`'s text path uses it (301 -> 330 MiB/s).
 
 ## [0.4.0] - 2026-09-22
 

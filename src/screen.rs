@@ -121,9 +121,19 @@ pub struct Screen {
     /// physical row `map[r]`, so scrolling any region rotates a few row
     /// indices instead of moving cells. Nothing outside [`Screen::index`]
     /// knows this.
+    ///
+    /// Rows are also **cleared lazily**: physical row `p` holds real cells
+    /// only in its first `written[p]` columns; every column past that reads
+    /// as `blank[p]`. Scrolling a row in or clearing it just resets those two
+    /// (O(1)), where filling every cell cost ~half of all emulation time on a
+    /// 177-column pane of short agent lines. Writes fill any gap first.
     cells: Vec<Cell>,
     /// Logical row to physical row; always a permutation of `0..rows`.
     map: Vec<usize>,
+    /// Per physical row: how many leading cells are real.
+    written: Vec<usize>,
+    /// Per physical row: what every cell past `written` reads as.
+    blank: Vec<Cell>,
     /// Where the cursor should rest after rendering. Always on the grid (see
     /// [`Screen::set_cursor`]).
     cursor: Cursor,
@@ -138,13 +148,7 @@ impl PartialEq for Screen {
         if self.rows != other.rows || self.cols != other.cols || self.cursor != other.cursor {
             return false;
         }
-        if self.map == other.map {
-            return self.cells == other.cells;
-        }
-        (0..self.rows).all(|r| {
-            let (a, b) = (self.row_slice(r), other.row_slice(r));
-            a == b
-        })
+        (0..self.rows).all(|r| (0..self.cols).all(|c| self.cell(r, c) == other.cell(r, c)))
     }
 }
 
@@ -158,6 +162,8 @@ impl Screen {
             cols,
             cells: vec![Cell::default(); rows * cols],
             map: (0..rows).collect(),
+            written: vec![0; rows],
+            blank: vec![Cell::default(); rows],
             cursor: Cursor::default(),
         }
     }
@@ -191,10 +197,11 @@ impl Screen {
     /// existing allocation. The caller must ensure the screen is already the
     /// right size; use [`Screen::new`] when the size changes.
     pub fn clear(&mut self) {
-        self.cells.fill(Cell::default());
         for (r, m) in self.map.iter_mut().enumerate() {
             *m = r;
         }
+        self.written.iter_mut().for_each(|w| *w = 0);
+        self.blank.iter_mut().for_each(|b| *b = Cell::default());
         self.cursor = Cursor::default();
     }
 
@@ -213,17 +220,28 @@ impl Screen {
         self.map[row]
     }
 
-    /// One logical row's cells, contiguous in the ring.
+    /// Make the first `upto` cells of physical row `p` real, filling the
+    /// gap past `written[p]` with the row's blank.
     #[inline]
-    fn row_slice(&self, row: usize) -> &[Cell] {
-        let start = self.physical(row) * self.cols;
-        &self.cells[start..start + self.cols]
+    fn materialize(&mut self, p: usize, upto: usize) {
+        let w = self.written[p];
+        if w < upto {
+            let base = p * self.cols;
+            let blank = self.blank[p];
+            self.cells[base + w..base + upto].fill(blank);
+            self.written[p] = upto;
+        }
     }
 
     /// The cell at `(row, col)`; out of bounds returns a default cell.
     pub fn cell(&self, row: usize, col: usize) -> Cell {
         if row < self.rows && col < self.cols {
-            self.cells[self.index(row, col)]
+            let p = self.physical(row);
+            if col < self.written[p] {
+                self.cells[self.index(row, col)]
+            } else {
+                self.blank[p]
+            }
         } else {
             Cell::default()
         }
@@ -232,6 +250,8 @@ impl Screen {
     /// Set one cell. Out-of-bounds writes are ignored.
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
+            let p = self.physical(row);
+            self.materialize(p, col + 1);
             let i = self.index(row, col);
             self.cells[i] = cell;
         }
@@ -257,8 +277,33 @@ impl Screen {
             return;
         }
         let n = cells.len().min(self.cols - col);
+        let p = self.physical(row);
+        self.materialize(p, col);
         let base = self.index(row, col);
         self.cells[base..base + n].copy_from_slice(&cells[..n]);
+        self.written[p] = self.written[p].max(col + n);
+    }
+
+    /// Write ASCII `text` into `row` from column `col` in one pass, each byte
+    /// a single-width cell in `style`, clipped at the right edge (an
+    /// out-of-range row or column writes nothing). Returns the cells written.
+    /// The same as [`Screen::copy_cells`] of `Cell::new(b as char, style)`
+    /// for each byte, without building the cells first — the hot path of a
+    /// terminal printing plain text. Bytes are not checked: callers pass
+    /// printable ASCII.
+    pub fn write_ascii(&mut self, row: usize, col: usize, text: &[u8], style: Style) -> usize {
+        if row >= self.rows || col >= self.cols {
+            return 0;
+        }
+        let n = text.len().min(self.cols - col);
+        let p = self.physical(row);
+        self.materialize(p, col);
+        let base = self.index(row, col);
+        for (cell, &b) in self.cells[base..base + n].iter_mut().zip(text) {
+            *cell = Cell::new(b as char, style);
+        }
+        self.written[p] = self.written[p].max(col + n);
+        n
     }
 
     /// Scroll rows `top..=bottom` up by `n`. Rows move up, the top `n` rows of
@@ -268,7 +313,7 @@ impl Screen {
     ///
     /// Any region, the whole screen included, scrolls by rotating its entries
     /// in the row map and clearing the rows that come in: `region` index moves
-    /// plus `n x cols` cells, never `region x cols`.
+    /// and O(1) per incoming row, never `region x cols`.
     ///
     /// A terminal scrolls on every output line. Copying the region cell by cell
     /// fed a 16 MB log at 11 MB/s on a 40x160 grid; moving whole rows still
@@ -285,11 +330,13 @@ impl Screen {
         }
     }
 
-    /// Fill one logical row with `fill`.
+    /// Fill one logical row with `fill`: O(1), by making the whole row read
+    /// as `fill` (see `written`).
     #[inline]
     fn fill_row(&mut self, row: usize, fill: Cell) {
-        let start = self.index(row, 0);
-        self.cells[start..start + self.cols].fill(fill);
+        let p = self.physical(row);
+        self.written[p] = 0;
+        self.blank[p] = fill;
     }
 
     /// Scroll rows `top..=bottom` down by `n`: the mirror of
@@ -563,6 +610,27 @@ mod tests {
                 assert_eq!(fast, slow, "{rows}x{cols}, step {step}");
             }
         }
+    }
+
+    #[test]
+    fn write_ascii_matches_copy_cells_and_clips() {
+        let style = Style {
+            bold: true,
+            ..Style::default()
+        };
+        let (mut a, mut b) = (numbered(3, 8), numbered(3, 8));
+        // Scroll first so the row is lazily blank with a styled fill.
+        let fill = Cell::new(' ', style);
+        a.scroll_rows_up(0, 2, 1, fill);
+        b.scroll_rows_up(0, 2, 1, fill);
+        let text = b"hello, world";
+        assert_eq!(a.write_ascii(2, 3, text, style), 5, "clipped at the edge");
+        let cells: Vec<Cell> = text.iter().map(|&c| Cell::new(c as char, style)).collect();
+        b.copy_cells(2, 3, &cells);
+        assert_eq!(a, b);
+        assert_eq!(a.cell(2, 0), fill, "the gap before the text keeps the fill");
+        assert_eq!(a.write_ascii(3, 0, b"x", style), 0);
+        assert_eq!(a.write_ascii(0, 8, b"x", style), 0);
     }
 
     #[test]
