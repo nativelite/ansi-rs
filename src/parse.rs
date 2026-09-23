@@ -460,6 +460,13 @@ impl Utf8Decoder {
         Self::default()
     }
 
+    /// True when no partial character is held over from a previous chunk.
+    /// Then a run of ASCII bytes decodes to itself, and a caller may use it
+    /// directly without going through [`Utf8Decoder::decode`].
+    pub fn is_idle(&self) -> bool {
+        self.len == 0
+    }
+
     /// Decode `bytes`, calling `f` with each piece of text in order.
     ///
     /// A character left incomplete at the end is held for the next call.

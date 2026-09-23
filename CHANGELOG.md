@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent output 777 -> 2,168 MiB/s. Events are unchanged.
 
 ### Added
+- **`Utf8Decoder::is_idle`**: true when no partial character is held, so a
+  caller can pass plain ASCII straight through without decoding.
 - **`Screen::write_ascii`**: write a run of ASCII as cells in one pass, without
   building the cells first; `vterm`'s text path uses it (301 -> 330 MiB/s).
 
