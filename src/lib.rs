@@ -31,6 +31,7 @@
 //! `rawterm` and `pty` crates' concerns; this crate turns bytes into meaning
 //! and meaning into bytes.
 
+mod history;
 mod marks;
 mod parse;
 mod screen;

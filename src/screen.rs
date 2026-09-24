@@ -2,6 +2,7 @@
 //! grid of styled cells, then emit only the bytes that change what the
 //! terminal is already showing.
 
+use crate::history::History;
 use crate::style::Style;
 
 /// How many terminal columns a [`Cell`] covers, modeling East Asian
@@ -108,12 +109,25 @@ impl Cursor {
     }
 }
 
+/// What a physical row's written cells are, so that storing it in the
+/// history need not look at each cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Plain {
+    /// Nothing written.
+    Empty,
+    /// Every written cell is a single-width character below U+0100 in this
+    /// style, one byte each in `Screen::text`.
+    Bytes(Style),
+    /// Anything else.
+    Mixed,
+}
+
 /// A `rows x cols` grid of [`Cell`]s plus a [`Cursor`], both 0-based.
 #[derive(Debug, Clone)]
 pub struct Screen {
     rows: usize,
     cols: usize,
-    /// Row-major, and exactly `(rows + history) * cols` long: sized by
+    /// Row-major, and exactly `rows * cols` long: sized by
     /// [`Screen::new`] / [`Screen::with_history`] and never grown or shrunk
     /// afterwards (`clear` refills in place, `set` and
     /// `copy_cells` overwrite in bounds). The indexers check it in debug builds.
@@ -129,22 +143,21 @@ pub struct Screen {
     /// (O(1)), where filling every cell cost ~half of all emulation time on a
     /// 177-column pane of short agent lines. Writes fill any gap first.
     cells: Vec<Cell>,
-    /// Logical row to physical row: `rows` distinct physical rows. With
-    /// history, the rest of the physical rows are in `hist` or `spare`.
+    /// Logical row to physical row.
     map: Vec<usize>,
-    /// **Scrollback, as a ring of physical rows.** When the whole screen
-    /// scrolls up, the row leaving the top joins this ring (newest last) and
-    /// the ring's oldest row, or a spare one, becomes the new bottom row,
-    /// lazily blank. No cell is copied. Capacity `history`; 0 keeps none.
-    hist: Vec<usize>,
-    hist_head: usize,
-    hist_len: usize,
-    history: usize,
-    /// Physical rows not yet used by the screen or the ring.
-    spare: Vec<usize>,
-    /// Lines that have ever entered the history (monotonic): lets a viewer
-    /// anchor on a line while output keeps scrolling.
-    scrolled: u64,
+    /// **Scrollback, stored compactly.** When the whole screen scrolls up,
+    /// the row leaving the top is encoded (its characters in UTF-8 plus
+    /// runs of style) and appended here, and its physical row comes back in
+    /// at the bottom, lazily blank. (It was a ring of full rows: 3.5 KB a
+    /// line on a 177-column screen, 35 MB for 10,000 lines.)
+    hist: History,
+    /// Only with history: per physical row, whether its written cells are
+    /// plain [`Plain::Bytes`], whose characters `text` (`rows * cols`)
+    /// mirrors. Such a row, the usual one, goes into the history as a copy
+    /// of its bytes rather than a scan of its cells (~110 ns a line of
+    /// 48 cells for the scan).
+    plain: Vec<Plain>,
+    text: Vec<u8>,
     /// Per physical row: how many leading cells are real.
     written: Vec<usize>,
     /// Per physical row: what every cell past `written` reads as.
@@ -179,20 +192,16 @@ impl Screen {
     /// (see [`Screen::history_len`]). Only a scroll of the whole screen feeds
     /// the history, as in other terminals; a scroll region does not.
     pub fn with_history(rows: usize, cols: usize, history: usize) -> Self {
-        let physical = rows + history;
         Screen {
             rows,
             cols,
-            cells: vec![Cell::default(); physical * cols],
+            cells: vec![Cell::default(); rows * cols],
             map: (0..rows).collect(),
-            hist: vec![0; history],
-            hist_head: 0,
-            hist_len: 0,
-            history,
-            spare: (rows..physical).rev().collect(),
-            scrolled: 0,
-            written: vec![0; physical],
-            blank: vec![Cell::default(); physical],
+            hist: History::new(history),
+            plain: vec![Plain::Empty; if history > 0 { rows } else { 0 }],
+            text: vec![0; if history > 0 { rows * cols } else { 0 }],
+            written: vec![0; rows],
+            blank: vec![Cell::default(); rows],
             cursor: Cursor::default(),
         }
     }
@@ -217,84 +226,53 @@ impl Screen {
     /// Lines of history held (at most the capacity given to
     /// [`Screen::with_history`]).
     pub fn history_len(&self) -> usize {
-        self.hist_len
+        self.hist.len()
     }
 
     /// The history capacity, in lines.
     pub fn history_capacity(&self) -> usize {
-        self.history
+        self.hist.capacity()
     }
 
     /// Lines that have ever entered the history, including ones since
     /// dropped: a monotonic count to anchor a scrolled-back view on.
     pub fn scrolled_lines(&self) -> u64 {
-        self.scrolled
+        self.hist.pushed()
     }
 
     /// A cell of the history: `age` 0 is the line that most recently left
-    /// the top of the screen. Out of range returns a default cell.
+    /// the top of the screen. Out of range returns a default cell. Each call
+    /// decodes into the stored line; for whole rows use
+    /// [`Screen::history_row`].
     pub fn history_cell(&self, age: usize, col: usize) -> Cell {
-        if age >= self.hist_len || col >= self.cols {
+        if col >= self.cols {
             return Cell::default();
         }
-        let p = self.hist[(self.hist_head + self.hist_len - 1 - age) % self.history];
-        if col < self.written[p] {
-            self.cells[p * self.cols + col]
-        } else {
-            self.blank[p]
-        }
+        self.hist.cell(age, col).unwrap_or_default()
+    }
+
+    /// History line `age` (0 the newest) as this screen's `cols` cells, into
+    /// `out`, replacing its contents. Returns false, leaving `out` empty,
+    /// when the line is not held.
+    pub fn history_row(&self, age: usize, out: &mut Vec<Cell>) -> bool {
+        self.hist.row(age, self.cols, out)
     }
 
     /// Forget the history (as `ESC [3J` asks).
     pub fn clear_history(&mut self) {
-        for i in 0..self.hist_len {
-            let p = self.hist[(self.hist_head + i) % self.history];
-            self.spare.push(p);
-        }
-        self.hist_head = 0;
-        self.hist_len = 0;
+        self.hist.clear();
     }
 
     /// Copy `other`'s history (oldest first) into this screen's, each line
     /// cut or padded to this width: used to keep scrollback across a resize.
     pub fn copy_history_from(&mut self, other: &Screen) {
         let cols = self.cols.min(other.cols);
-        for age in (0..other.hist_len).rev() {
-            let Some(p) = self.take_history_row() else {
-                return;
-            };
-            self.written[p] = 0;
-            self.blank[p] = Cell::default();
-            for c in 0..cols {
-                let cell = other.history_cell(age, c);
-                self.cells[p * self.cols + c] = cell;
-            }
-            self.written[p] = cols;
-            self.push_history(p);
+        let mut row = Vec::with_capacity(other.cols);
+        for age in (0..other.history_len()).rev() {
+            other.history_row(age, &mut row);
+            row.truncate(cols);
+            self.hist.push(&row, Cell::default());
         }
-    }
-
-    /// A physical row free to become history: a spare one, else the oldest
-    /// history row (dropped). `None` with no history capacity.
-    fn take_history_row(&mut self) -> Option<usize> {
-        if self.history == 0 {
-            return None;
-        }
-        if let Some(p) = self.spare.pop() {
-            return Some(p);
-        }
-        let p = self.hist[self.hist_head];
-        self.hist_head = (self.hist_head + 1) % self.history;
-        self.hist_len -= 1;
-        Some(p)
-    }
-
-    /// Append physical row `p` as the newest history line.
-    fn push_history(&mut self, p: usize) {
-        let at = (self.hist_head + self.hist_len) % self.history;
-        self.hist[at] = p;
-        self.hist_len += 1;
-        self.scrolled += 1;
     }
 
     pub fn rows(&self) -> usize {
@@ -337,7 +315,7 @@ impl Screen {
     /// Logical row `row` sits at physical row `map[row]`.
     #[inline]
     fn index(&self, row: usize, col: usize) -> usize {
-        debug_assert_eq!(self.cells.len(), (self.rows + self.history) * self.cols);
+        debug_assert_eq!(self.cells.len(), self.rows * self.cols);
         debug_assert!(row < self.rows && col < self.cols);
         self.physical(row) * self.cols + col
     }
@@ -358,7 +336,28 @@ impl Screen {
             let blank = self.blank[p];
             self.cells[base + w..base + upto].fill(blank);
             self.written[p] = upto;
+            if self.track(p, blank) {
+                self.text[base + w..base + upto].fill(blank.ch as u8);
+            }
         }
+    }
+
+    /// With history, fold a write of cells like `cell` into physical row
+    /// `p`'s [`Plain`] state; true if the row stays plain, and the caller
+    /// then mirrors the characters into `text`.
+    #[inline]
+    fn track(&mut self, p: usize, cell: Cell) -> bool {
+        let Some(state) = self.plain.get_mut(p) else {
+            return false;
+        };
+        let byte = cell.width == CellWidth::Single && (cell.ch as u32) < 0x100;
+        *state = match *state {
+            _ if !byte => Plain::Mixed,
+            Plain::Empty => Plain::Bytes(cell.style),
+            Plain::Bytes(s) if s == cell.style => Plain::Bytes(s),
+            _ => Plain::Mixed,
+        };
+        *state != Plain::Mixed
     }
 
     /// The cell at `(row, col)`; out of bounds returns a default cell.
@@ -382,6 +381,9 @@ impl Screen {
             self.materialize(p, col + 1);
             let i = self.index(row, col);
             self.cells[i] = cell;
+            if self.track(p, cell) {
+                self.text[i] = cell.ch as u8;
+            }
         }
     }
 
@@ -410,6 +412,9 @@ impl Screen {
         let base = self.index(row, col);
         self.cells[base..base + n].copy_from_slice(&cells[..n]);
         self.written[p] = self.written[p].max(col + n);
+        if let Some(state) = self.plain.get_mut(p) {
+            *state = Plain::Mixed;
+        }
     }
 
     /// Write ASCII `text` into `row` from column `col` in one pass, each byte
@@ -425,12 +430,21 @@ impl Screen {
         }
         let n = text.len().min(self.cols - col);
         let p = self.physical(row);
+        if col == 0 && n >= self.written[p] {
+            // Everything written is replaced.
+            if let Some(state) = self.plain.get_mut(p) {
+                *state = Plain::Empty;
+            }
+        }
         self.materialize(p, col);
         let base = self.index(row, col);
         for (cell, &b) in self.cells[base..base + n].iter_mut().zip(text) {
             *cell = Cell::new(b as char, style);
         }
         self.written[p] = self.written[p].max(col + n);
+        if n > 0 && self.track(p, Cell::new(' ', style)) {
+            self.text[base..base + n].copy_from_slice(&text[..n]);
+        }
         n
     }
 
@@ -452,20 +466,21 @@ impl Screen {
             return;
         }
         let n = n.min(bottom - top + 1);
-        if self.history > 0 && top == 0 && bottom == self.rows - 1 {
-            // The whole screen: each departing row joins the history, and a
-            // free (or the oldest) history row comes in at the bottom.
-            for _ in 0..n {
-                let Some(fresh) = self.take_history_row() else {
-                    break;
-                };
-                let leaving = self.map[0];
-                self.map.rotate_left(1);
-                self.map[self.rows - 1] = fresh;
-                self.fill_row(self.rows - 1, fill);
-                self.push_history(leaving);
+        if self.hist.capacity() > 0 && top == 0 && bottom == self.rows - 1 {
+            // The whole screen: each departing row is stored in the history
+            // before its physical row comes back in at the bottom.
+            for r in 0..n {
+                let p = self.map[r];
+                let (from, to) = (p * self.cols, p * self.cols + self.written[p]);
+                match self.plain[p] {
+                    Plain::Bytes(style) => {
+                        self.hist
+                            .push_ascii(&self.text[from..to], style, self.blank[p])
+                    }
+                    Plain::Empty => self.hist.push_ascii(&[], Style::default(), self.blank[p]),
+                    Plain::Mixed => self.hist.push(&self.cells[from..to], self.blank[p]),
+                }
             }
-            return;
         }
         self.map[top..=bottom].rotate_left(n);
         for r in bottom + 1 - n..=bottom {
@@ -480,6 +495,9 @@ impl Screen {
         let p = self.physical(row);
         self.written[p] = 0;
         self.blank[p] = fill;
+        if let Some(state) = self.plain.get_mut(p) {
+            *state = Plain::Empty;
+        }
     }
 
     /// Scroll rows `top..=bottom` down by `n`: the mirror of
@@ -829,6 +847,72 @@ mod tests {
             hist.copy_cells(3, 0, &line(100 + k));
         }
         assert_eq!(hist.history_len(), 3);
+    }
+
+    /// Every row that scrolls off comes back from the history cell for cell:
+    /// styles, wide and continuation halves, other characters, and the lazy
+    /// blank past what was written, over many random rows and scroll counts.
+    #[test]
+    fn history_rows_come_back_exactly_as_they_left() {
+        let (rows, cols, keep) = (5, 12, 400);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let styles = [
+            Style::default(),
+            Style {
+                fg: crate::style::Color::Indexed(9),
+                bold: true,
+                ..Style::default()
+            },
+            Style {
+                bg: crate::style::Color::Rgb(10, 20, 30),
+                italic: true,
+                strike: true,
+                ..Style::default()
+            },
+        ];
+        let chars = ['a', 'Z', ' ', 'é', '─', '😀'];
+        let mut s = Screen::with_history(rows, cols, keep);
+        let mut left: Vec<Vec<Cell>> = Vec::new();
+        for step in 0..3000 {
+            let row = next(rows as u64) as usize;
+            let col = next(cols as u64) as usize;
+            // Mostly one style and plain text, so rows often stay plain.
+            let style = styles[if next(4) == 0 { next(3) as usize } else { 0 }];
+            match next(10) {
+                0 => s.set(row, col, Cell::wide('漢', style)),
+                1 => s.set(row, col, Cell::continuation(style)),
+                2..=4 => s.set(row, col, Cell::new(chars[next(6) as usize], style)),
+                _ => {
+                    let text = &b"ls -la \xe9x"[..next(10) as usize];
+                    s.write_ascii(row, if next(2) == 0 { 0 } else { col }, text, style);
+                }
+            }
+            if next(3) == 0 {
+                let n = 1 + next(3) as usize;
+                for r in 0..n.min(rows) {
+                    left.push((0..cols).map(|c| s.cell(r, c)).collect());
+                }
+                s.scroll_rows_up(0, rows - 1, n, Cell::new(' ', styles[step % 3]));
+            }
+        }
+        assert_eq!(s.scrolled_lines(), left.len() as u64);
+        assert_eq!(s.history_len(), keep.min(left.len()));
+        let mut out = Vec::new();
+        for age in 0..s.history_len() {
+            assert!(s.history_row(age, &mut out));
+            let want = &left[left.len() - 1 - age];
+            assert_eq!(&out, want, "age {age}");
+            for (c, cell) in want.iter().enumerate() {
+                assert_eq!(s.history_cell(age, c), *cell, "age {age} col {c}");
+            }
+        }
+        assert!(!s.history_row(s.history_len(), &mut out));
     }
 
     #[test]

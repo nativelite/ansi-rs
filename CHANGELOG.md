@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`Screen::history_row`**: a whole history line as cells, decoded once.
+  `Screen::history_cell` still works, but now decodes into the line on each
+  call.
 - **`MarkScanner`: shell-integration marks without a full parse.** Finds
   OSC 133 (and VS Code's OSC 633) prompt-start, command-start, output-start
   and command-end sequences, with the exit code, in a raw byte stream fed in
@@ -19,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable from the running one.
 
 ### Changed
+- **Scrollback is stored compactly.** A line leaving the top of a
+  `Screen::with_history` screen is encoded as its text in UTF-8 plus runs of
+  style (a short form of 12 bytes over the text for the usual one-style
+  line) into 64 KiB chunks, instead of staying as a row of 20-byte cells in
+  a ring of `rows + history` rows. A 10,000-line history of 48-character
+  lines on a 177-column screen goes from ~35 MB to well under 1 MB. The
+  screen keeps, per row, whether everything written is one-byte characters
+  in one style, with those bytes mirrored, so such a row is stored by copying
+  its bytes rather than scanning its cells. Emulation speed with history is
+  unchanged on one screen (fwbench, 177x47 flood, 9 rounds: -32% against no
+  history, -35% before); with 16 fwterm panes, where the ring's cold rows
+  competed for cache, the same output finished in 16.4-16.7 s instead of
+  26.2-27.1 s. No change to what a screen shows or to the meaning of the
+  history API.
 - **Scrolling a region is as cheap as scrolling the whole screen.** `Screen`
   now reaches rows through a row map instead of a ring origin, so
   `scroll_rows_up` / `scroll_rows_down` rotate row indices for any region
@@ -38,9 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Scrollback: `Screen::with_history(rows, cols, lines)`** keeps up to
-  `lines` lines that scroll off the top of the whole screen, as a ring of the
-  screen's own rows: no cell is copied when a line leaves. Read with
-  `history_len`, `history_cell(age, col)` and `scrolled_lines` (a monotonic
+  `lines` lines that scroll off the top of the whole screen, stored compactly
+  (see Changed). Read with `history_row(age, ..)`, `history_len`,
+  `history_cell(age, col)` and `scrolled_lines` (a monotonic
   count to anchor a view); `clear_history`, and `copy_history_from` to keep it
   across a resize. `visible()` is the screen without its history. A scroll
   region never feeds the history. `Screen::new` keeps none, as before.
