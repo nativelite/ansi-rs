@@ -25,7 +25,8 @@ let warn = Style { bold: true, fg: Color::Indexed(1), ..Style::default() };
 assert_eq!(warn.sgr(), "\x1b[0;1;31m");
 
 let plain = Style::default();
-assert_eq!(plain.transition_to(&warn), "\x1b[0;1;31m");
+assert_eq!(plain.transition_to(&warn), "\x1b[1;31m"); // only adds: no reset
+assert_eq!(warn.transition_to(&plain), "\x1b[0m"); // turns off: reset + set
 ```
 
 **Parse a terminal byte stream, incrementally.** `Parser::feed` accepts
@@ -61,8 +62,10 @@ stdout_write(&prev.diff(&next)); // your I/O, not ours
 
 - **I/O and raw mode**: the `rawterm` crate's concern. This crate never
   touches a file descriptor.
-- **Full terminal emulation**: the parser tokenizes; it does not maintain
-  scrollback, tabs, or modes. `apply_sgr` is provided because the renderer
+- **Full terminal emulation**: the parser tokenizes; nothing here applies
+  the tokens to a `Screen` or tracks tab stops or modes. `Screen` offers the
+  pieces an emulator builds on (region scrolling, and scrollback via
+  `Screen::with_history`), and `apply_sgr` is provided because the renderer
   and any output-interpreter need it.
 - **Computing display width**: `Cell` models double-width glyphs
   (`CellWidth::Wide` + `CellWidth::Continuation`) and the renderers honor
@@ -87,7 +90,7 @@ golden for the minimal-update case.
 ## Development
 
 ```bash
-python dev.py check   # zero-dependency guard + cargo test (the pre-push gate)
+python dev.py check   # guard + cargo fmt --check + cargo test (the pre-push gate)
 python dev.py test    # cargo test
 python dev.py fmt     # cargo fmt --check
 python dev.py guard   # zero-dependency guard
