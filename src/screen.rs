@@ -162,6 +162,10 @@ pub struct Screen {
     written: Vec<usize>,
     /// Per physical row: what every cell past `written` reads as.
     blank: Vec<Cell>,
+    /// Per physical row: it wrapped onto the next row (the emulator's
+    /// autowrap) rather than ending in a line break of its own, so copying
+    /// joins the two. Cleared when the row is cleared or scrolled in.
+    wrapped: Vec<bool>,
     /// Where the cursor should rest after rendering. Always on the grid (see
     /// [`Screen::set_cursor`]).
     cursor: Cursor,
@@ -176,7 +180,10 @@ impl PartialEq for Screen {
         if self.rows != other.rows || self.cols != other.cols || self.cursor != other.cursor {
             return false;
         }
-        (0..self.rows).all(|r| (0..self.cols).all(|c| self.cell(r, c) == other.cell(r, c)))
+        (0..self.rows).all(|r| {
+            self.row_wrapped(r) == other.row_wrapped(r)
+                && (0..self.cols).all(|c| self.cell(r, c) == other.cell(r, c))
+        })
     }
 }
 
@@ -202,6 +209,7 @@ impl Screen {
             text: vec![0; if history > 0 { rows * cols } else { 0 }],
             written: vec![0; rows],
             blank: vec![Cell::default(); rows],
+            wrapped: vec![false; rows],
             cursor: Cursor::default(),
         }
     }
@@ -216,6 +224,7 @@ impl Screen {
             let w = self.written[p];
             s.blank[r] = self.blank[p];
             s.written[r] = w;
+            s.wrapped[r] = self.wrapped[p];
             let (src, dst) = (p * self.cols, r * self.cols);
             s.cells[dst..dst + w].copy_from_slice(&self.cells[src..src + w]);
         }
@@ -258,6 +267,27 @@ impl Screen {
         self.hist.row(age, self.cols, out)
     }
 
+    /// Whether history line `age` (0 the newest) wrapped onto the next line;
+    /// false when not held.
+    pub fn history_wrapped(&self, age: usize) -> bool {
+        self.hist.wrapped(age)
+    }
+
+    /// Whether `row` wrapped onto the row below (autowrap), so the two are
+    /// one line of output. Out of range is false.
+    pub fn row_wrapped(&self, row: usize) -> bool {
+        row < self.rows && self.wrapped[self.physical(row)]
+    }
+
+    /// Mark `row` as wrapped onto the row below, or not; the emulator sets
+    /// it when a line autowraps. Out of range is ignored.
+    pub fn set_row_wrapped(&mut self, row: usize, wrapped: bool) {
+        if row < self.rows {
+            let p = self.physical(row);
+            self.wrapped[p] = wrapped;
+        }
+    }
+
     /// Forget the history (as `ESC [3J` asks).
     pub fn clear_history(&mut self) {
         self.hist.clear();
@@ -271,7 +301,8 @@ impl Screen {
         for age in (0..other.history_len()).rev() {
             other.history_row(age, &mut row);
             row.truncate(cols);
-            self.hist.push(&row, Cell::default());
+            self.hist
+                .push(&row, Cell::default(), other.history_wrapped(age));
         }
     }
 
@@ -472,13 +503,19 @@ impl Screen {
             for r in 0..n {
                 let p = self.map[r];
                 let (from, to) = (p * self.cols, p * self.cols + self.written[p]);
+                let wrapped = self.wrapped[p];
                 match self.plain[p] {
                     Plain::Bytes(style) => {
                         self.hist
-                            .push_ascii(&self.text[from..to], style, self.blank[p])
+                            .push_ascii(&self.text[from..to], style, self.blank[p], wrapped)
                     }
-                    Plain::Empty => self.hist.push_ascii(&[], Style::default(), self.blank[p]),
-                    Plain::Mixed => self.hist.push(&self.cells[from..to], self.blank[p]),
+                    Plain::Empty => {
+                        self.hist
+                            .push_ascii(&[], Style::default(), self.blank[p], wrapped)
+                    }
+                    Plain::Mixed => self
+                        .hist
+                        .push(&self.cells[from..to], self.blank[p], wrapped),
                 }
             }
         }
@@ -495,6 +532,7 @@ impl Screen {
         let p = self.physical(row);
         self.written[p] = 0;
         self.blank[p] = fill;
+        self.wrapped[p] = false;
         if let Some(state) = self.plain.get_mut(p) {
             *state = Plain::Empty;
         }
@@ -797,6 +835,32 @@ mod tests {
     /// A screen with history scrolls exactly like one without, and every line
     /// that left the top is in the history, newest first, until the ring is
     /// full and drops the oldest.
+    #[test]
+    fn a_wrap_flag_follows_its_row_into_history_and_clears_on_reuse() {
+        let fill = Cell::default();
+        let mut s = Screen::with_history(3, 5, 10);
+        s.write_str(0, 0, "hello", Style::default());
+        s.set_row_wrapped(0, true);
+        assert!(s.row_wrapped(0) && !s.row_wrapped(1));
+        assert!(s.visible().row_wrapped(0), "a snapshot keeps it");
+        let mut other = Screen::with_history(3, 5, 10);
+        other.write_str(0, 0, "hello", Style::default());
+        assert_ne!(s, other, "the flag is part of what a screen holds");
+        // Scrolled off the top: the history keeps it; the row that comes back
+        // in at the bottom starts unwrapped.
+        s.scroll_rows_up(0, 2, 1, fill);
+        assert!(s.history_wrapped(0));
+        assert!(!s.row_wrapped(2), "reused row cleared");
+        let mut copy = Screen::with_history(3, 5, 10);
+        copy.copy_history_from(&s);
+        assert!(copy.history_wrapped(0), "a resize's history copy keeps it");
+        s.set_row_wrapped(1, true);
+        s.clear();
+        assert!(!s.row_wrapped(1));
+        s.set_row_wrapped(9, true); // out of range: ignored
+        assert!(!s.row_wrapped(9));
+    }
+
     #[test]
     fn history_keeps_what_scrolls_off_the_top() {
         let fill = Cell::new(' ', Style::default());

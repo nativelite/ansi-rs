@@ -55,6 +55,9 @@ pub(crate) struct History {
     odd: Vec<(u32, CellWidth)>,
     /// The last style a short line used, encoded.
     style: Option<(Style, [u8; STYLE])>,
+    /// Per line held, oldest first: whether it wrapped onto the next line
+    /// (the screen's autowrap, not a line break of its own).
+    wrapped: VecDeque<bool>,
 }
 
 impl History {
@@ -79,9 +82,10 @@ impl History {
     }
 
     /// Append a line: its first `cells`, the rest of the row reading as
-    /// `blank`. Does nothing with no capacity.
-    pub(crate) fn push(&mut self, cells: &[Cell], blank: Cell) {
-        if self.begin() {
+    /// `blank`; `wrapped` if it continued onto the next line. Does nothing
+    /// with no capacity.
+    pub(crate) fn push(&mut self, cells: &[Cell], blank: Cell, wrapped: bool) {
+        if self.begin(wrapped) {
             let chunk = self.chunks.back_mut().expect("a chunk to append to");
             encode(&mut chunk.data, cells, blank, &mut self.runs, &mut self.odd);
         }
@@ -90,8 +94,8 @@ impl History {
     /// Append a line whose first cells are `text`, a single-width cell per
     /// byte (as [`crate::Screen::write_ascii`] writes them) in `style`, the
     /// rest reading as `blank`: [`History::push`] without looking at cells.
-    pub(crate) fn push_ascii(&mut self, text: &[u8], style: Style, blank: Cell) {
-        if self.begin() {
+    pub(crate) fn push_ascii(&mut self, text: &[u8], style: Style, blank: Cell, wrapped: bool) {
+        if self.begin(wrapped) {
             let chunk = self.chunks.back_mut().expect("a chunk to append to");
             encode_ascii(&mut chunk.data, text, style, blank, &mut self.style);
         }
@@ -99,7 +103,7 @@ impl History {
 
     /// Make room for one more line and start it in the last chunk; false,
     /// doing nothing, with no capacity.
-    fn begin(&mut self) -> bool {
+    fn begin(&mut self, wrapped: bool) -> bool {
         if self.capacity == 0 {
             return false;
         }
@@ -117,12 +121,14 @@ impl History {
         }
         let chunk = self.chunks.back_mut().expect("a chunk to append to");
         chunk.starts.push(chunk.data.len() as u32);
+        self.wrapped.push_back(wrapped);
         self.next += 1;
         true
     }
 
     fn drop_oldest(&mut self) {
         self.head += 1;
+        self.wrapped.pop_front();
         let spent = self.chunks.len() > 1 && self.chunks[0].end() <= self.head;
         if spent {
             let mut c = self.chunks.pop_front().expect("a spent chunk");
@@ -144,6 +150,7 @@ impl History {
             }
         }
         self.head = self.next;
+        self.wrapped.clear();
     }
 
     /// The encoded line `age` lines back (0 the newest), if held.
@@ -154,6 +161,12 @@ impl History {
         let n = self.next - 1 - age as u64;
         let i = self.chunks.partition_point(|c| c.end() <= n);
         Some(self.chunks[i].line(n))
+    }
+
+    /// Whether line `age` (0 the newest) wrapped onto the next; false if not
+    /// held.
+    pub(crate) fn wrapped(&self, age: usize) -> bool {
+        age < self.wrapped.len() && self.wrapped[self.wrapped.len() - 1 - age]
     }
 
     /// Line `age` as `cols` cells into `out` (replacing its contents);
@@ -505,7 +518,7 @@ mod tests {
         row.push(Cell::new('x', Style::default()));
         let blank = Cell::new(' ', rgb);
         let mut h = History::new(4);
-        h.push(&row, blank);
+        h.push(&row, blank, false);
         let mut out = Vec::new();
         assert!(h.row(0, 10, &mut out));
         let mut want = row.clone();
@@ -517,13 +530,13 @@ mod tests {
         // Narrower: cut; trailing written blanks are not stored.
         assert!(h.row(0, 3, &mut out));
         assert_eq!(out, want[..3]);
-        h.push(&[blank, blank], blank);
+        h.push(&[blank, blank], blank, false);
         assert!(h.row(0, 2, &mut out));
         assert_eq!(out, [blank, blank]);
         assert!(!h.row(2, 2, &mut out) && out.is_empty());
         // Plain ASCII without cells, including a byte past ASCII.
-        h.push_ascii(b"ok \xe9", red, blank);
-        h.push_ascii(b"", red, blank);
+        h.push_ascii(b"ok \xe9", red, blank, false);
+        h.push_ascii(b"", red, blank, false);
         assert!(h.row(1, 5, &mut out));
         let mut want = cells("ok \u{e9}", red);
         want.push(blank);
@@ -533,9 +546,9 @@ mod tests {
         assert_eq!(out, [blank, blank]);
         assert_eq!(h.cell(4, 0), None);
         // The short form: the default blank, styles changing between lines.
-        h.push_ascii(b"abc", red, Cell::default());
-        h.push_ascii(b"de", rgb, Cell::default());
-        h.push_ascii(b"", rgb, Cell::default());
+        h.push_ascii(b"abc", red, Cell::default(), false);
+        h.push_ascii(b"de", rgb, Cell::default(), false);
+        h.push_ascii(b"", rgb, Cell::default(), false);
         for (age, text, style) in [(2, "abc", red), (1, "de", rgb), (0, "", rgb)] {
             let mut want = cells(text, style);
             want.resize(4, Cell::default());
@@ -548,11 +561,34 @@ mod tests {
     }
 
     #[test]
+    fn wrap_flags_follow_their_lines_as_old_ones_drop() {
+        let mut h = History::new(3);
+        for (i, w) in [false, true, true, false].into_iter().enumerate() {
+            h.push_ascii(
+                format!("l{i}").as_bytes(),
+                Style::default(),
+                Cell::default(),
+                w,
+            );
+        }
+        // Held: l1 (wrapped), l2 (wrapped), l3; l0 dropped.
+        assert_eq!(
+            (h.wrapped(0), h.wrapped(1), h.wrapped(2)),
+            (false, true, true)
+        );
+        assert!(!h.wrapped(3), "not held");
+        h.clear();
+        assert!(!h.wrapped(0));
+        h.push(&[], Cell::default(), true);
+        assert!(h.wrapped(0));
+    }
+
+    #[test]
     fn the_oldest_lines_drop_past_capacity_across_chunks() {
         let mut h = History::new(3000);
         let line = |i: usize| cells(&format!("{i:0>100}"), Style::default());
         for i in 0..10_000 {
-            h.push(&line(i), Cell::default());
+            h.push(&line(i), Cell::default(), false);
         }
         assert_eq!((h.len(), h.pushed()), (3000, 10_000));
         let mut out = Vec::new();
@@ -564,7 +600,7 @@ mod tests {
         assert!(h.chunks.len() <= 7, "{} chunks", h.chunks.len());
         h.clear();
         assert_eq!((h.len(), h.pushed()), (0, 10_000));
-        h.push(&line(7), Cell::default());
+        h.push(&line(7), Cell::default(), false);
         assert!(h.row(0, 100, &mut out));
         assert_eq!(out, line(7));
         assert_eq!(History::new(0).len(), 0);
