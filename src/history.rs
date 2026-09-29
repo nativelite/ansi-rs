@@ -28,6 +28,11 @@ impl Chunk {
         self.first + self.starts.len() as u64
     }
 
+    /// Memory it holds: what its buffers have allocated, not just used.
+    fn held(&self) -> usize {
+        self.data.capacity() + self.starts.capacity() * std::mem::size_of::<u32>()
+    }
+
     fn line(&self, n: u64) -> &[u8] {
         let i = (n - self.first) as usize;
         let from = self.starts[i] as usize;
@@ -40,7 +45,9 @@ impl Chunk {
 }
 
 /// Up to `capacity` encoded lines, numbered from 0 as they arrive; the
-/// oldest are dropped past capacity.
+/// oldest are dropped past capacity, and, with a byte cap
+/// ([`History::set_max_bytes`]), whole oldest chunks while the encoded lines
+/// take more than that.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct History {
     chunks: VecDeque<Chunk>,
@@ -58,6 +65,10 @@ pub(crate) struct History {
     /// Per line held, oldest first: whether it wrapped onto the next line
     /// (the screen's autowrap, not a line break of its own).
     wrapped: VecDeque<bool>,
+    /// Memory `chunks` hold (their buffers' capacity), and the most they may
+    /// (0: no cap).
+    bytes: usize,
+    max_bytes: usize,
 }
 
 impl History {
@@ -87,7 +98,10 @@ impl History {
     pub(crate) fn push(&mut self, cells: &[Cell], blank: Cell, wrapped: bool) {
         if self.begin(wrapped) {
             let chunk = self.chunks.back_mut().expect("a chunk to append to");
+            let before = chunk.held();
             encode(&mut chunk.data, cells, blank, &mut self.runs, &mut self.odd);
+            self.bytes += chunk.held() - before;
+            self.trim();
         }
     }
 
@@ -97,7 +111,46 @@ impl History {
     pub(crate) fn push_ascii(&mut self, text: &[u8], style: Style, blank: Cell, wrapped: bool) {
         if self.begin(wrapped) {
             let chunk = self.chunks.back_mut().expect("a chunk to append to");
+            let before = chunk.held();
             encode_ascii(&mut chunk.data, text, style, blank, &mut self.style);
+            self.bytes += chunk.held() - before;
+            self.trim();
+        }
+    }
+
+    /// Hold at most `max` bytes of memory (0: no cap), dropping whole oldest
+    /// chunks past it, so the history's memory is bounded however wide or
+    /// colourful its lines are. The newest chunk always stays, so it may run
+    /// over by up to a chunk (96 KiB) or one very long line.
+    pub(crate) fn set_max_bytes(&mut self, max: usize) {
+        self.max_bytes = max;
+        self.trim();
+    }
+
+    /// Memory held by the lines (their chunks' buffers).
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Drop whole oldest chunks while over the byte cap.
+    fn trim(&mut self) {
+        while self.max_bytes > 0 && self.bytes > self.max_bytes && self.chunks.len() > 1 {
+            let c = self.chunks.pop_front().expect("more than one chunk");
+            let end = c.end();
+            for _ in self.head..end {
+                self.wrapped.pop_front();
+            }
+            self.head = end;
+            self.bytes -= c.held();
+            self.recycle(c);
+        }
+    }
+
+    fn recycle(&mut self, mut c: Chunk) {
+        if self.free.len() < KEEP_FREE {
+            c.starts.clear();
+            c.data.clear();
+            self.free.push(c);
         }
     }
 
@@ -116,11 +169,18 @@ impl History {
             .map_or(true, |c| c.data.len() >= CHUNK && !c.starts.is_empty());
         if full {
             let mut c = self.free.pop().unwrap_or_default();
+            if c.data.capacity() == 0 {
+                // Room for a line past the chunk size without doubling.
+                c.data.reserve_exact(CHUNK + CHUNK / 2);
+            }
             c.first = self.next;
+            self.bytes += c.held();
             self.chunks.push_back(c);
         }
         let chunk = self.chunks.back_mut().expect("a chunk to append to");
+        let before = chunk.held();
         chunk.starts.push(chunk.data.len() as u32);
+        self.bytes += chunk.held() - before;
         self.wrapped.push_back(wrapped);
         self.next += 1;
         true
@@ -131,26 +191,20 @@ impl History {
         self.wrapped.pop_front();
         let spent = self.chunks.len() > 1 && self.chunks[0].end() <= self.head;
         if spent {
-            let mut c = self.chunks.pop_front().expect("a spent chunk");
-            if self.free.len() < KEEP_FREE {
-                c.starts.clear();
-                c.data.clear();
-                self.free.push(c);
-            }
+            let c = self.chunks.pop_front().expect("a spent chunk");
+            self.bytes -= c.held();
+            self.recycle(c);
         }
     }
 
     /// Forget every line; numbering continues.
     pub(crate) fn clear(&mut self) {
-        while let Some(mut c) = self.chunks.pop_front() {
-            if self.free.len() < KEEP_FREE {
-                c.starts.clear();
-                c.data.clear();
-                self.free.push(c);
-            }
+        while let Some(c) = self.chunks.pop_front() {
+            self.recycle(c);
         }
         self.head = self.next;
         self.wrapped.clear();
+        self.bytes = 0;
     }
 
     /// The encoded line `age` lines back (0 the newest), if held.
@@ -604,5 +658,52 @@ mod tests {
         assert!(h.row(0, 100, &mut out));
         assert_eq!(out, line(7));
         assert_eq!(History::new(0).len(), 0);
+    }
+
+    #[test]
+    fn a_byte_cap_drops_whole_old_chunks_and_keeps_the_newest_lines() {
+        let mut h = History::new(1_000_000);
+        h.set_max_bytes(256 * 1024);
+        // Wide lines with a style change on every cell: a few KB each.
+        let line = |i: usize| {
+            let mut v = Vec::new();
+            for c in 0..300usize {
+                let style = Style {
+                    fg: Color::Indexed((c % 200) as u8),
+                    ..Style::default()
+                };
+                v.extend(cells(&format!("{}", (i + c) % 10), style));
+            }
+            v
+        };
+        for i in 0..5_000 {
+            h.push(&line(i), Cell::default(), i % 2 == 1);
+        }
+        assert!(
+            h.bytes() <= 256 * 1024 + 2 * CHUNK,
+            "held {} bytes",
+            h.bytes()
+        );
+        assert!(h.len() < 5_000 && h.len() > 20, "{} lines", h.len());
+        assert_eq!(h.pushed(), 5_000);
+        // The newest are intact, and their wrap marks with them.
+        let mut out = Vec::new();
+        for age in [0, 1, h.len() - 1] {
+            assert!(h.row(age, 300, &mut out));
+            assert_eq!(out, line(4_999 - age), "age {age}");
+            assert_eq!(h.wrapped(age), (4_999 - age) % 2 == 1);
+        }
+        assert!(!h.row(h.len(), 300, &mut out), "older ones are gone");
+        // Without a cap only the line count limits it.
+        let mut free = History::new(1_000);
+        for i in 0..1_000 {
+            free.push(&line(i), Cell::default(), false);
+        }
+        assert_eq!(free.len(), 1_000);
+        // Capping later trims at once.
+        free.set_max_bytes(128 * 1024);
+        assert!(free.bytes() <= 128 * 1024 + 2 * CHUNK && free.len() < 1_000);
+        h.clear();
+        assert_eq!(h.bytes(), 0);
     }
 }

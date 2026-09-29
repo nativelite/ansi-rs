@@ -243,6 +243,19 @@ impl Screen {
         self.hist.capacity()
     }
 
+    /// Hold at most `max` bytes of memory in history (0: no cap), dropping
+    /// the oldest lines past it: a bound however wide or colourful lines
+    /// are, on top of the line capacity. It may run over by up to one
+    /// 96 KiB chunk.
+    pub fn set_history_bytes(&mut self, max: usize) {
+        self.hist.set_max_bytes(max);
+    }
+
+    /// Memory the history holds: its buffers' capacity.
+    pub fn history_bytes(&self) -> usize {
+        self.hist.bytes()
+    }
+
     /// Lines that have ever entered the history, including ones since
     /// dropped: a monotonic count to anchor a scrolled-back view on.
     pub fn scrolled_lines(&self) -> u64 {
