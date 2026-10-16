@@ -418,6 +418,20 @@ impl Screen {
         }
     }
 
+    /// Row `row` without a copy: the cells written so far, and the cell every
+    /// column past them reads as (the row's blank). The two together are
+    /// what [`Screen::cell`] returns column by column, so a compositor or a
+    /// diff walks a row as one slice and one fill instead of `cols` lookups.
+    /// Out of range: an empty slice and a default cell.
+    pub fn row_cells(&self, row: usize) -> (&[Cell], Cell) {
+        if row >= self.rows {
+            return (&[], Cell::default());
+        }
+        let p = self.physical(row);
+        let base = p * self.cols;
+        (&self.cells[base..base + self.written[p]], self.blank[p])
+    }
+
     /// Set one cell. Out-of-bounds writes are ignored.
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.rows && col < self.cols {
@@ -685,6 +699,45 @@ fn emit_changes(prev: Option<&Screen>, next: &Screen, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_cells_agrees_with_cell_before_and_after_scrolling() {
+        use crate::Color;
+        let mut s = Screen::with_history(4, 10, 8);
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
+        s.write_str(0, 0, "abc", Style::default());
+        s.write_str(1, 2, "de", red);
+        s.copy_cells(
+            3,
+            0,
+            &[Cell::wide('\u{4e2d}', red), Cell::continuation(red)],
+        );
+        let check = |s: &Screen| {
+            for r in 0..s.rows() {
+                let (written, fill) = s.row_cells(r);
+                assert!(written.len() <= s.cols());
+                for c in 0..s.cols() {
+                    let want = s.cell(r, c);
+                    let got = written.get(c).copied().unwrap_or(fill);
+                    assert_eq!(got, want, "row {r} col {c}");
+                }
+            }
+        };
+        check(&s);
+        // Rows written in full, then scrolled: the row map moves, the
+        // slices follow.
+        s.write_str(2, 0, "0123456789", red);
+        check(&s);
+        s.scroll_rows_up(0, 3, 1, Cell::new('~', red));
+        check(&s);
+        let (written, fill) = s.row_cells(3);
+        assert!(written.is_empty(), "a scrolled-in row is lazily blank");
+        assert_eq!(fill, Cell::new('~', red));
+        assert_eq!(s.row_cells(4), (&[][..], Cell::default()));
+    }
     use crate::style::Style;
 
     /// A screen whose every cell names its own position, so any move is visible.
