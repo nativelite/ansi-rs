@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`Screen::row_cells`**: a row without a copy, as the slice of cells
+  written so far plus the blank every column past them reads as. What
+  `Screen::cell` returns column by column, for compositors and diffs that
+  walk whole rows: one slice and one fill instead of `cols` lookups.
 - **`Screen::history_row`**: a whole history line as cells, decoded once.
   `Screen::history_cell` still works, but now decodes into the line on each
   call.
