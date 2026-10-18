@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-18
+
 ### Added
 - **`Screen::row_cells`**: a row without a copy, as the slice of cells
   written so far plus the blank every column past them reads as. What
@@ -178,7 +180,8 @@ Breaking: the double-width model and the cursor are typed.
 Second crate in the nativelite **agent terminal** suite (see
 `roadmap/agent-terminal-suite.md` in `nativelite/ops`).
 
-[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/nativelite/ansi-rs/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/nativelite/ansi-rs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/nativelite/ansi-rs/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nativelite/ansi-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nativelite/ansi-rs/compare/v0.2.0...v0.3.0
