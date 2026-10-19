@@ -33,31 +33,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   style (a short form of 12 bytes over the text for the usual one-style
   line) into 64 KiB chunks, instead of staying as a row of 20-byte cells in
   a ring of `rows + history` rows. A 10,000-line history of 48-character
-  lines on a 177-column screen goes from ~35 MB to well under 1 MB. The
+  lines on a 177-column screen goes from ~35 MB to about 1 MiB
+  (`cargo bench --bench history_memory`: `history_bytes()` 1.01 MiB, the
+  buffers' capacity, 34x smaller than the 33.9 MiB the ring of cells came
+  to; the encoded lines themselves are ~60 bytes each, ~0.6 MB, and the
+  rest is unused chunk room). The
   screen keeps, per row, whether everything written is one-byte characters
   in one style, with those bytes mirrored, so such a row is stored by copying
-  its bytes rather than scanning its cells. Emulation speed with history is
-  unchanged on one screen (fwbench, 177x47 flood, 9 rounds: -32% against no
-  history, -35% before); with 16 fwterm panes, where the ring's cold rows
+  its bytes rather than scanning its cells. Emulation speed with history was
+  unchanged on one screen, and with 16 panes, where the ring's cold rows
   competed for cache, the same output finished in 16.4-16.7 s instead of
-  26.2-27.1 s. No change to what a screen shows or to the meaning of the
-  history API.
+  26.2-27.1 s: both measured by foldwave's fwbench (external, 177x47 flood,
+  9 rounds, Windows 11), not reproducible from this repo. No change to what
+  a screen shows or to the meaning of the history API.
 - **Scrolling a region is as cheap as scrolling the whole screen.** `Screen`
   now reaches rows through a row map instead of a ring origin, so
   `scroll_rows_up` / `scroll_rows_down` rotate row indices for any region
   rather than moving the region's cells. A 177x47 terminal with a one-row
   status line (`DECSTBM`) went from 21 to ~176 MiB/s, level with a full-screen
-  scroll. No API change.
+  scroll (measured through `nativelite-vterm`'s `Term::feed`, external, 64 MiB
+  of agent output, 3 runs; the before/after is not reproducible here, but
+  `cargo bench --bench feed_throughput` shows the "level" part on this
+  crate's own path: region scroll 938 MiB/s against 929 full-screen). No API
+  change.
 - **Rows clear lazily.** A scrolled-in or cleared row no longer fills every
   cell: each row records how far it has been written and what the rest reads
   as. On a 177-column pane of short agent lines, filling rows had been ~half
-  of all emulation time. Through `vterm`: 188 -> 301 MiB/s.
+  of all emulation time. Through `nativelite-vterm`'s `Term::feed` (external,
+  177x47, 64 MiB of agent output): 188 -> 301 MiB/s; not reproducible from
+  this repo.
 - **UTF-8 decoding hands over the longest valid prefix in one call** (std's
   validator) instead of scanning ASCII byte by byte and validating again;
   invalid bytes take the old path, so replacements are unchanged.
 - **The parser skips plain text eight bytes at a time** to the next control
   byte (C0 or DEL) instead of a state-machine step per byte: `feed_with` on
-  agent output 777 -> 2,168 MiB/s. Events are unchanged.
+  64 MiB of agent output 777 -> 2,168 MiB/s, as measured when the change
+  landed (commit f478a18; that stream is not in the repo). The in-repo bench
+  (`cargo bench --bench feed_throughput`, 64 MiB of generated agent output,
+  127-byte lines, median of 5) measures `Parser::feed_with` at 3,748 MiB/s
+  and `Parser::feed` at 408 MiB/s on the same machine; longer text runs
+  favour the skip, so the two "after" numbers are not directly comparable.
+  Events are unchanged.
 
 ### Added
 - **Scrollback: `Screen::with_history(rows, cols, lines)`** keeps up to
@@ -70,7 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Utf8Decoder::is_idle`**: true when no partial character is held, so a
   caller can pass plain ASCII straight through without decoding.
 - **`Screen::write_ascii`**: write a run of ASCII as cells in one pass, without
-  building the cells first; `vterm`'s text path uses it (301 -> 330 MiB/s).
+  building the cells first; `vterm`'s text path uses it (301 -> 330 MiB/s
+  through `nativelite-vterm`'s `Term::feed`, external, not reproducible from
+  this repo; `cargo bench --bench feed_throughput` drives this crate's path
+  alone, `write_ascii` plus a scroll per line, at 929 MiB/s without history
+  and 439 MiB/s with a 10,000-line history).
 
 ## [0.4.0] - 2026-09-22
 

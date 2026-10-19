@@ -15,3 +15,13 @@ categories = ["command-line-interface", "parser-implementations"]
 [lib]
 name = "ansi"
 path = "src/lib.rs"
+
+# Stdlib-only benches (see benches/README.md). `harness = false`: a `main()`
+# timing with std::time::Instant; under `cargo test` they build and return.
+[[bench]]
+name = "history_memory"
+harness = false
+
+[[bench]]
+name = "feed_throughput"
+harness = false
