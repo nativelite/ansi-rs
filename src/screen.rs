@@ -803,10 +803,10 @@ mod tests {
         }
     }
 
-    /// The ring is invisible: a screen scrolled into a state equals a screen
-    /// built that way, its rows read back in order, and a clear resets it.
+    /// The row map is invisible: a screen scrolled into a state equals a
+    /// screen built that way, its rows read back in order, and a clear resets it.
     #[test]
-    fn the_row_ring_is_invisible_to_readers() {
+    fn a_fully_scrolled_screen_equals_one_built_that_way() {
         let fill = Cell::new(' ', Style::default());
         let mut s = numbered(4, 3);
         // Scroll a whole screen's worth and then some, so origin wraps.
@@ -898,9 +898,8 @@ mod tests {
         assert_eq!(a.write_ascii(0, 8, b"x", style), 0);
     }
 
-    /// A screen with history scrolls exactly like one without, and every line
-    /// that left the top is in the history, newest first, until the ring is
-    /// full and drops the oldest.
+    /// A row's wrap flag leaves with it into the history and is clear on the
+    /// row that takes its place; setting it out of range is ignored.
     #[test]
     fn a_wrap_flag_follows_its_row_into_history_and_clears_on_reuse() {
         let fill = Cell::default();
@@ -927,6 +926,9 @@ mod tests {
         assert!(!s.row_wrapped(9));
     }
 
+    /// A screen with history scrolls exactly like one without, and every line
+    /// that left the top is in the history, newest first, until the ring is
+    /// full and drops the oldest.
     #[test]
     fn history_keeps_what_scrolls_off_the_top() {
         let fill = Cell::new(' ', Style::default());
